@@ -46,7 +46,7 @@ class COMetaModel(pl.LightningModule):
     )
     self.num_training_steps_cached = None
 
-  def test_epoch_end(self, outputs):
+  def _legacy_test_epoch_end(self, outputs):
     unmerged_metrics = {}
     for metrics in outputs:
       for k, v in metrics.items():

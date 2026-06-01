@@ -64,6 +64,7 @@ class MISModel(COMetaModel):
         bipartite_return_vc_graph=self.args.bipartite_return_vc_graph,
     )
 
+
   def forward(self, x, t, edge_index):
     return self.model(x, t, edge_index=edge_index)
 
@@ -125,14 +126,36 @@ class MISModel(COMetaModel):
         and hasattr(graph_data, "constraint_mask")
     )
   
+    #if is_bipartite:
+    #  variable_mask = graph_data.variable_mask.bool().to(device)
+  
+    #  # Diffusion labels are only the variable-node labels.
+    #  node_labels = graph_data.x[variable_mask].reshape(-1).to(device)
+  
+    #  # For now assume batch_size=1 in the smoke test.
+    #  point_indicator = variable_mask.sum().view(1)
     if is_bipartite:
       variable_mask = graph_data.variable_mask.bool().to(device)
-  
-      # Diffusion labels are only the variable-node labels.
+
       node_labels = graph_data.x[variable_mask].reshape(-1).to(device)
-  
-      # For now assume batch_size=1 in the smoke test.
-      point_indicator = variable_mask.sum().view(1)
+
+      if not hasattr(graph_data, "batch"):
+        raise AttributeError(
+            "Batched bipartite graph_data is missing graph_data.batch. "
+            "This is needed to assign one diffusion timestep per graph."
+        )
+
+      graph_batch = graph_data.batch.to(device)
+      variable_batch = graph_batch[variable_mask]
+
+      batch_size = int(graph_batch.max().item()) + 1
+
+      # Number of variable nodes per graph. This replaces point_indicator
+      # for the bipartite representation.
+      point_indicator = torch.bincount(
+          variable_batch,
+          minlength=batch_size,
+      )
     else:
       variable_mask = None
       node_labels = graph_data.x.reshape(-1).to(device)
@@ -155,39 +178,53 @@ class MISModel(COMetaModel):
     edge_index = edge_index.to(device).reshape(2, -1)
   
     if is_bipartite:
-      # xt has shape [num_variable_nodes, 1, 1]
-      # but self.forward needs one value per graph node.
-      xt = xt.reshape(-1).to(device)
-      epsilon = epsilon.reshape(-1).to(device)
-  
+      #t_per_graph_np = np.random.randint(
+      #    1,
+      #    self.diffusion.T + 1,
+      #    batch_size,
+      #).astype(int)
+
+      #t_variables_np = np.repeat(
+      #    t_per_graph_np,
+      #    point_indicator.cpu().numpy(),
+      #)
+
+      #xt, epsilon = self.diffusion.sample(node_labels, t_variables_np)
+
+      #t_tensor = torch.from_numpy(t_variables_np).float().to(device).reshape(-1)
+      #t_per_graph = torch.from_numpy(t_per_graph_np).float().to(device)
+
       t_tensor = torch.from_numpy(t).float().to(device).reshape(-1)
-  
-      # Start from graph_data.x so constraint-node features are preserved.
-      xt_full = graph_data.x.clone().float().reshape(-1).to(device)
-  
-      # Replace only variable nodes by the noisy diffusion state.
-      xt_full[variable_mask] = xt
-  
-      # Timestep vector must also have one value per graph node.
-      t_full = torch.zeros(
-          graph_data.x.shape[0],
+
+      t_per_graph = torch.zeros(
+          batch_size,
           device=device,
           dtype=t_tensor.dtype,
       )
-      t_full[variable_mask] = t_tensor
-  
-      # Forward on the full bipartite graph.
+      t_per_graph.scatter_(
+          0,
+          variable_batch,
+          t_tensor,
+      )
+      
+      xt = xt.reshape(-1).to(device=device, dtype=graph_data.x.dtype)
+      epsilon = epsilon.reshape(-1).to(device=device, dtype=graph_data.x.dtype)
+      
+      xt_full = graph_data.x.clone().float().reshape(-1).to(device)
+      xt_full[variable_mask] = xt
+      
+      t_full = t_per_graph[graph_batch]
+      
       epsilon_pred_full = self.forward(
           xt_full.float(),
           t_full.float(),
           edge_index,
       )
-  
-      # Loss only on variable nodes.
+
+
       epsilon_pred = epsilon_pred_full[variable_mask].reshape(-1)
-  
-      loss = F.mse_loss(epsilon_pred, epsilon.float())
-  
+
+      loss = F.mse_loss(epsilon_pred, epsilon.float())  
     else:
       xt = xt.reshape(-1).to(device)
       epsilon = epsilon.reshape(-1).to(device)
@@ -233,15 +270,24 @@ class MISModel(COMetaModel):
       xt = self.gaussian_posterior(target_t, t, pred, xt)
       return xt
 
-  def test_step(self, batch, batch_idx, draw=False, split='test'):
-    device = batch[-1].device
+  def _is_bipartite_graph_data(self, graph_data):
+    return (
+        hasattr(graph_data, "variable_mask")
+        and hasattr(graph_data, "constraint_mask")
+    )
 
+  def test_step(self, batch, batch_idx, draw=False, split='test'):
     real_batch_idx, graph_data, point_indicator = batch
+
+    if self._is_bipartite_graph_data(graph_data):
+      return self.bipartite_test_step(batch, batch_idx, draw=draw, split=split)
+
+    device = graph_data.x.device
     node_labels = graph_data.x
     edge_index = graph_data.edge_index
 
     stacked_predict_labels = []
-    edge_index = edge_index.to(node_labels.device).reshape(2, -1)
+    edge_index = edge_index.to(device).reshape(2, -1)
     edge_index_np = edge_index.cpu().numpy()
     adj_mat = scipy.sparse.coo_matrix(
         (np.ones_like(edge_index_np[0]), (edge_index_np[0], edge_index_np[1])),
@@ -249,6 +295,7 @@ class MISModel(COMetaModel):
 
     for _ in range(self.args.sequential_sampling):
       xt = torch.randn_like(node_labels.float())
+
       if self.args.parallel_sampling > 1:
         xt = xt.repeat(self.args.parallel_sampling, 1, 1)
         xt = torch.randn_like(xt)
@@ -257,15 +304,24 @@ class MISModel(COMetaModel):
         xt.requires_grad = True
       else:
         xt = (xt > 0).long()
+
       xt = xt.reshape(-1)
 
+      cur_edge_index = edge_index
       if self.args.parallel_sampling > 1:
-        edge_index = self.duplicate_edge_index(edge_index, node_labels.shape[0], device)
+        cur_edge_index = self.duplicate_edge_index(
+            edge_index,
+            node_labels.shape[0],
+            device,
+        )
 
       batch_size = 1
       steps = self.args.inference_diffusion_steps
-      time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
-                                        T=self.diffusion.T, inference_T=steps)
+      time_schedule = InferenceSchedule(
+          inference_schedule=self.args.inference_schedule,
+          T=self.diffusion.T,
+          inference_T=steps,
+      )
 
       for i in range(steps):
         t1, t2 = time_schedule(i)
@@ -274,22 +330,26 @@ class MISModel(COMetaModel):
 
         if self.diffusion_type == 'gaussian':
           xt = self.gaussian_denoise_step(
-              xt, t1, device, edge_index, target_t=t2)
+              xt, t1, device, cur_edge_index, target_t=t2)
         else:
           xt = self.categorical_denoise_step(
-              xt, t1, device, edge_index, target_t=t2)
+              xt, t1, device, cur_edge_index, target_t=t2)
 
       if self.diffusion_type == 'gaussian':
         predict_labels = xt.float().cpu().detach().numpy() * 0.5 + 0.5
       else:
         predict_labels = xt.float().cpu().detach().numpy() + 1e-6
+
       stacked_predict_labels.append(predict_labels)
 
     predict_labels = np.concatenate(stacked_predict_labels, axis=0)
     all_sampling = self.args.sequential_sampling * self.args.parallel_sampling
 
     splitted_predict_labels = np.split(predict_labels, all_sampling)
-    solved_solutions = [mis_decode_np(predict_labels, adj_mat) for predict_labels in splitted_predict_labels]
+    solved_solutions = [
+        mis_decode_np(predict_labels, adj_mat)
+        for predict_labels in splitted_predict_labels
+    ]
     solved_costs = [solved_solution.sum() for solved_solution in solved_solutions]
     best_solved_cost = np.max(solved_costs)
 
@@ -297,10 +357,267 @@ class MISModel(COMetaModel):
     metrics = {
         f"{split}/gt_cost": gt_cost,
     }
+
     for k, v in metrics.items():
-      self.log(k, v, on_epoch=True, sync_dist=True)
-    self.log(f"{split}/solved_cost", best_solved_cost, prog_bar=True, on_epoch=True, sync_dist=True)
+      self.log(k, float(v), on_epoch=True, sync_dist=True)
+
+    self.log(
+        f"{split}/solved_cost",
+        float(best_solved_cost),
+        prog_bar=True,
+        on_epoch=True,
+        sync_dist=True,
+    )
+
     return metrics
+
+  def bipartite_test_step(self, batch, batch_idx, draw=False, split='test'):
+    if self.diffusion_type != 'gaussian':
+      raise NotImplementedError(
+          "Bipartite validation/test is currently implemented only for gaussian diffusion."
+      )
+
+    real_batch_idx, graph_data, point_indicator = batch
+    device = graph_data.x.device
+
+    if not hasattr(graph_data, "graph_edge_index"):
+      raise AttributeError(
+          "Bipartite graph_data is missing graph_edge_index. "
+          "Store the original MIS graph edges as graph_data.graph_edge_index."
+      )
+
+    variable_mask = graph_data.variable_mask.bool().to(device)
+    node_labels = graph_data.x[variable_mask].reshape(-1).to(device)
+
+    model_edge_index = graph_data.edge_index.to(device).reshape(2, -1)
+    graph_edge_index = graph_data.graph_edge_index.cpu().long().reshape(2, -1)
+
+    if graph_edge_index.numel() > 0:
+      assert graph_edge_index.min().item() >= 0
+      assert graph_edge_index.max().item() < node_labels.shape[0], (
+          "graph_edge_index must use variable-local ids in [0, num_variables)."
+      )
+
+    edge_index_np = graph_edge_index.numpy()
+    adj_mat = scipy.sparse.coo_matrix(
+        (
+            np.ones_like(edge_index_np[0]),
+            (edge_index_np[0], edge_index_np[1]),
+        ),
+        shape=(node_labels.shape[0], node_labels.shape[0]),
+    )
+
+    stacked_predict_labels = []
+    num_total_nodes = graph_data.x.shape[0]
+    num_variable_nodes = node_labels.shape[0]
+
+    for _ in range(self.args.sequential_sampling):
+      xt = torch.randn_like(node_labels.float()).reshape(-1)
+      xt.requires_grad = True
+
+      cur_model_edge_index = model_edge_index
+      cur_variable_mask = variable_mask
+      cur_x_template = graph_data.x.float().reshape(-1).to(device)
+
+      if self.args.parallel_sampling > 1:
+        xt = xt.repeat(self.args.parallel_sampling)
+        xt = torch.randn_like(xt)
+        xt.requires_grad = True
+
+        cur_model_edge_index = self.duplicate_edge_index(
+            model_edge_index,
+            num_total_nodes,
+            device,
+        )
+        cur_variable_mask = variable_mask.repeat(self.args.parallel_sampling)
+        cur_x_template = cur_x_template.repeat(self.args.parallel_sampling)
+
+      batch_size = 1
+      steps = self.args.inference_diffusion_steps
+      time_schedule = InferenceSchedule(
+          inference_schedule=self.args.inference_schedule,
+          T=self.diffusion.T,
+          inference_T=steps,
+      )
+
+      for i in range(steps):
+        t1, t2 = time_schedule(i)
+        t1 = np.array([t1 for _ in range(batch_size)]).astype(int)
+        t2 = np.array([t2 for _ in range(batch_size)]).astype(int)
+
+        xt = self.bipartite_gaussian_denoise_step(
+            xt_variables=xt,
+            t=t1,
+            device=device,
+            x_template=cur_x_template,
+            variable_mask=cur_variable_mask,
+            edge_index=cur_model_edge_index,
+            target_t=t2,
+        )
+
+      predict_labels = xt.float().cpu().detach().numpy() * 0.5 + 0.5
+      stacked_predict_labels.append(predict_labels)
+
+    predict_labels = np.concatenate(stacked_predict_labels, axis=0)
+    all_sampling = self.args.sequential_sampling * self.args.parallel_sampling
+    splitted_predict_labels = np.split(predict_labels, all_sampling)
+
+    for sample in splitted_predict_labels:
+      assert sample.shape[0] == num_variable_nodes, (
+          f"Expected prediction length {num_variable_nodes}, got {sample.shape[0]}"
+      )
+
+    solved_solutions = [
+        mis_decode_np(predict_labels, adj_mat)
+        for predict_labels in splitted_predict_labels
+    ]
+    solved_costs = [solved_solution.sum() for solved_solution in solved_solutions]
+    best_solved_cost = np.max(solved_costs)
+
+    gt_cost = node_labels.cpu().numpy().sum()
+    metrics = {
+        f"{split}/gt_cost": gt_cost,
+    }
+
+    for k, v in metrics.items():
+      self.log(k, float(v), on_epoch=True, sync_dist=True)
+
+    self.log(
+        f"{split}/solved_cost",
+        float(best_solved_cost),
+        prog_bar=True,
+        on_epoch=True,
+        sync_dist=True,
+    )
+
+    return metrics
+
+  def bipartite_gaussian_denoise_step(
+      self,
+      xt_variables,
+      t,
+      device,
+      x_template,
+      variable_mask,
+      edge_index,
+      target_t=None,
+  ):
+    with torch.no_grad():
+      # Keep this identical in spirit to gaussian_denoise_step:
+      # gaussian_posterior expects a CPU tensor / numpy-compatible timestep.
+      t_cpu = torch.from_numpy(t).view(1)
+
+      # The model input timestep still needs to live on the model/device.
+      t_model = t_cpu.float().to(device)
+
+      xt_full = x_template.clone().float().reshape(-1).to(device)
+      xt_full[variable_mask] = xt_variables.float().reshape(-1).to(device)
+
+      t_full = torch.zeros(
+          xt_full.shape[0],
+          device=device,
+          dtype=t_model.dtype,
+      )
+      t_full[variable_mask] = t_model
+
+      pred_full = self.forward(
+          xt_full.float(),
+          t_full.float(),
+          edge_index.long().to(device),
+      )
+
+      pred_variables = pred_full[variable_mask].reshape(-1)
+
+      xt_variables = self.gaussian_posterior(
+          target_t,
+          t_cpu,
+          pred_variables,
+          xt_variables,
+      )
+
+      return xt_variables
+  #def test_step(self, batch, batch_idx, draw=False, split='test'):
+  #  device = batch[-1].device
+
+  #  real_batch_idx, graph_data, point_indicator = batch
+  #  node_labels = graph_data.x
+  #  edge_index = graph_data.edge_index
+
+  #  stacked_predict_labels = []
+  #  
+  #  if self._is_bipartite_graph_data(graph_data):
+  #    variable_mask = graph_data.variable_mask.bool().to(device)
+  #    node_labels = graph_data.x[variable_mask].reshape(-1)
+  #    model_edge_index = graph_data.edge_index.to(device).reshape(2,-1)
+  #    graph_edge_index = graph_data.graph_edge_index.cpu().long().reshape(2,-1)
+  #    edge_index_np = graph_edge_index.numpy()
+  #    adj_mat = scipy.sparse.coo_matrix(
+  #            (
+  #                np.ones_like(edge_index_np[0]),
+  #                (edge_index_np[0], edge_index_np[1]),
+  #            ),
+  #            shape=(node_labels.shape[0], node_labels.shape[0]),
+  #    )
+  #  edge_index = edge_index.to(node_labels.device).reshape(2, -1)
+  #  edge_index_np = edge_index.cpu().numpy()
+  #  adj_mat = scipy.sparse.coo_matrix(
+  #      (np.ones_like(edge_index_np[0]), (edge_index_np[0], edge_index_np[1])),
+  #  )
+
+  #  for _ in range(self.args.sequential_sampling):
+  #    xt = torch.randn_like(node_labels.float())
+  #    if self.args.parallel_sampling > 1:
+  #      xt = xt.repeat(self.args.parallel_sampling, 1, 1)
+  #      xt = torch.randn_like(xt)
+
+  #    if self.diffusion_type == 'gaussian':
+  #      xt.requires_grad = True
+  #    else:
+  #      xt = (xt > 0).long()
+  #    xt = xt.reshape(-1)
+
+  #    if self.args.parallel_sampling > 1:
+  #      edge_index = self.duplicate_edge_index(edge_index, node_labels.shape[0], device)
+
+  #    batch_size = 1
+  #    steps = self.args.inference_diffusion_steps
+  #    time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
+  #                                      T=self.diffusion.T, inference_T=steps)
+
+  #    for i in range(steps):
+  #      t1, t2 = time_schedule(i)
+  #      t1 = np.array([t1 for _ in range(batch_size)]).astype(int)
+  #      t2 = np.array([t2 for _ in range(batch_size)]).astype(int)
+
+  #      if self.diffusion_type == 'gaussian':
+  #        xt = self.gaussian_denoise_step(
+  #            xt, t1, device, edge_index, target_t=t2)
+  #      else:
+  #        xt = self.categorical_denoise_step(
+  #            xt, t1, device, edge_index, target_t=t2)
+
+  #    if self.diffusion_type == 'gaussian':
+  #      predict_labels = xt.float().cpu().detach().numpy() * 0.5 + 0.5
+  #    else:
+  #      predict_labels = xt.float().cpu().detach().numpy() + 1e-6
+  #    stacked_predict_labels.append(predict_labels)
+
+  #  predict_labels = np.concatenate(stacked_predict_labels, axis=0)
+  #  all_sampling = self.args.sequential_sampling * self.args.parallel_sampling
+
+  #  splitted_predict_labels = np.split(predict_labels, all_sampling)
+  #  solved_solutions = [mis_decode_np(predict_labels, adj_mat) for predict_labels in splitted_predict_labels]
+  #  solved_costs = [solved_solution.sum() for solved_solution in solved_solutions]
+  #  best_solved_cost = np.max(solved_costs)
+
+  #  gt_cost = node_labels.cpu().numpy().sum()
+  #  metrics = {
+  #      f"{split}/gt_cost": gt_cost,
+  #  }
+  #  for k, v in metrics.items():
+  #    self.log(k, v, on_epoch=True, sync_dist=True)
+  #  self.log(f"{split}/solved_cost", best_solved_cost, prog_bar=True, on_epoch=True, sync_dist=True)
+  #  return metrics
 
   def validation_step(self, batch, batch_idx):
     return self.test_step(batch, batch_idx, split='val')

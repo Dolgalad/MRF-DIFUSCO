@@ -331,6 +331,7 @@ class MISDataset(torch.utils.data.Dataset):
         vcg = VCGraph(pb)
       
         edge_index = get_edge_index(vcg)
+        graph_edge_index = get_edge_index(pb.g)
       
         num_vc_nodes = vcg.number_of_nodes()
         bipartite = torch.zeros(num_vc_nodes, dtype=torch.long)
@@ -359,6 +360,7 @@ class MISDataset(torch.utils.data.Dataset):
         data = Data(
             x=x,
             edge_index=edge_index,
+            graph_edge_index=graph_edge_index,
             bipartite=bipartite,
             factor_sizes=factor_sizes,
             neighbors=neighbors,
