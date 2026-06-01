@@ -64,6 +64,9 @@ def arg_parser():
   parser.add_argument('--do_test', action='store_true')
   parser.add_argument('--do_valid_only', action='store_true')
 
+  parser.add_argument("--input_representation", type=str, default="original", choices=["original", "bipartite"], help="Input representation passed to the model. 'original' preserves the default DIFUSCO graph input, 'bipartite' uses the variable-constraint bipartite representation")
+
+
   args = parser.parse_args()
   return args
 
