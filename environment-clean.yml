@@ -1,0 +1,22 @@
+name: difusco-clean
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - scipy
+  - pandas
+  - networkx
+  - matplotlib
+  - tqdm
+  - scikit-learn
+  - pyyaml
+  - cython
+  - cmake
+  - ninja
+  - pip:
+      - torch==2.3.0
+      - torchvision==0.18.0
+      - torchaudio==2.3.0
+      - --index-url https://download.pytorch.org/whl/cu118
