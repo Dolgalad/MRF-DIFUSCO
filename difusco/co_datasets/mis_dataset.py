@@ -14,6 +14,19 @@ import torch
 
 from torch_geometric.data import Data as GraphData
 
+from bpropy.co.mis import MIS
+
+@contextmanager
+def file_lock(lock_path):
+    """Simple process-level file lock for cache writes."""
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
 
 class MISDataset(torch.utils.data.Dataset):
     def __init__(self, data_file, 
@@ -28,32 +41,45 @@ class MISDataset(torch.utils.data.Dataset):
                  bipartite_return_factor_graph=False,
                  bipartite_return_vc_graph=False,
       ):
-      self.data_file = data_file
-      self.file_lines = glob.glob(data_file)
-      self.data_label_dir = data_label_dir
-      self.input_representation = input_representation
+        self.data_file = data_file
+        self.file_lines = glob.glob(data_file)
+        self.data_label_dir = data_label_dir
+        self.input_representation = input_representation
   
-      self.bipartite_cache_dir = bipartite_cache_dir
-      self.bipartite_cache_version = bipartite_cache_version
-      self.bipartite_cache_refresh = bipartite_cache_refresh
-      self.bipartite_with_lbp = bipartite_with_lbp
-      self.bipartite_with_nmf = bipartite_with_nmf
-      self.bipartite_with_ss = bipartite_with_ss
-      self.bipartite_return_factor_graph = bipartite_return_factor_graph
-      self.bipartite_return_vc_graph = bipartite_return_vc_graph
+        self.bipartite_cache_dir = bipartite_cache_dir
+        self.bipartite_cache_version = bipartite_cache_version
+        self.bipartite_cache_refresh = bipartite_cache_refresh
+        self.bipartite_with_lbp = bipartite_with_lbp
+        self.bipartite_with_nmf = bipartite_with_nmf
+        self.bipartite_with_ss = bipartite_with_ss
+        self.bipartite_return_factor_graph = bipartite_return_factor_graph
+        self.bipartite_return_vc_graph = bipartite_return_vc_graph
   
-      if self.input_representation not in ("original", "bipartite"):
-          raise ValueError(
-                  f"Unknown input_representation={self.input_representation!r}. "
-                  "Expected 'original' or 'bipartite'."
-                  )
+        if self.input_representation not in ("original", "bipartite"):
+            raise ValueError(
+                    f"Unknown input_representation={self.input_representation!r}. "
+                    "Expected 'original' or 'bipartite'."
+                    )
   
-      if self.input_representation == "bipartite":
-          self._init_bipartite_cache_dir()
-      print(
-              f'Loaded "{data_file}" with {len(self.file_lines)} examples'
-              f'using input_representation="{self.input_representition}"'
-      )
+        if self.input_representation == "bipartite":
+            self._init_bipartite_cache_dir()
+        print(
+                f'Loaded "{data_file}" with {len(self.file_lines)} examples'
+                f'using input_representation="{self.input_representation}"'
+        )
+
+    def _init_bipartite_cache_dir(self):
+        """Initialize the directory used to store cached bipartite examples."""
+        if self.bipartite_cache_dir is None:
+          # Put cache next to the graph files by default.
+          # self.data_file may be a glob like /path/train/*gpickle.
+          data_root = os.path.dirname(os.path.dirname(os.path.abspath(self.data_file)))
+          self.bipartite_cache_dir = os.path.join(
+              data_root,
+              f"bipartite_cache_{self.bipartite_cache_version}",
+          )
+
+        os.makedirs(self.bipartite_cache_dir, exist_ok=True)
     def _bipartite_cache_key(self, idx):
         graph_path = self.file_lines[idx]
         st = os.stat(graph_path)
@@ -256,13 +282,123 @@ class MISDataset(torch.utils.data.Dataset):
             data.preprocess_time_s = preprocess_time_s
     
             return data  
+
+    def _load_node_labels(self, idx, graph):
+        num_nodes = graph.number_of_nodes()
+
+        if self.data_label_dir is None:
+            node_labels = [_[1] for _ in graph.nodes(data="label")]
+            if node_labels is not None and node_labels[0] is not None:
+                node_labels = np.array(node_labels, dtype=np.int64)
+            else:
+                node_labels = np.zeros(num_nodes, dtype=np.int64)
+        else:
+            base_label_file = os.path.basename(self.file_lines[idx]).replace(
+                ".gpickle", "_unweighted.result"
+            )
+            node_label_file = os.path.join(self.data_label_dir, base_label_file)
+            with open(node_label_file, "r") as f:
+                node_labels = [int(_) for _ in f.read().splitlines()]
+            node_labels = np.array(node_labels, dtype=np.int64)
+
+        assert node_labels.shape[0] == num_nodes
+        return node_labels
+
+    def mis_to_bipartite_data(
+        pb,
+        *,
+        y=None,
+        with_lbp=False,
+        with_nmf=False,
+        with_ss=False,
+        return_graphs=False,
+    ):
+        """Lightweight MIS -> homogeneous VC PyG Data conversion.
+      
+        This intentionally avoids bpropy.adapters.vc_to_data.problem_to_data because
+        that path computes LP/handcrafted features, PE features, and hetero graphs.
+        For DIFUSCO bipartite input, node features are only current assignment values.
+        """
+        from torch_geometric.data import Data
+        from bpropy.graphs.vc_graph import VCGraph
+        from bpropy.utils.graph_utils import get_edge_index
+        from bpropy.mrf.factor_graph import FactorGraph
+        from bpropy.mrf.lbp_edges import LBPEdges
+        from bpropy.mrf.nmf_edges import NMFEdges
+        from bpropy.mrf.sufficient_statistics import x2ss
+      
+        vcg = VCGraph(pb)
+      
+        edge_index = get_edge_index(vcg)
+      
+        num_vc_nodes = vcg.number_of_nodes()
+        bipartite = torch.zeros(num_vc_nodes, dtype=torch.long)
+        factor_sizes = torch.ones(num_vc_nodes, dtype=torch.long)
+        neighbors = torch.zeros(num_vc_nodes, dtype=torch.long)
+      
+        for n, d in vcg.nodes(data=True):
+            is_constraint = int(d["bipartite"])
+            bipartite[n] = is_constraint
+            degree = len(list(vcg.neighbors(n)))
+            neighbors[n] = degree
+            if is_constraint:
+                factor_sizes[n] = degree
+      
+        # Current assignment values only.
+        # Variable nodes get y, constraint nodes get 0.
+        x = torch.zeros((num_vc_nodes, 1), dtype=torch.float32)
+        if y is not None:
+            if isinstance(y, np.ndarray):
+                y_tensor = torch.from_numpy(y)
+            else:
+                y_tensor = torch.as_tensor(y)
+            y_tensor = y_tensor.to(torch.float32).view(-1, 1)
+            x[: y_tensor.shape[0]] = y_tensor
+      
+        data = Data(
+            x=x,
+            edge_index=edge_index,
+            bipartite=bipartite,
+            factor_sizes=factor_sizes,
+            neighbors=neighbors,
+        )
+      
+        data.problem_type_name = "MIS"
+        data.problem_type_code = torch.tensor([0], dtype=torch.long)
+      
+        # Keep both labels: one generic PyG-style y and one explicit original label.
+        if y is not None:
+            data.y = y_tensor.view(-1).to(torch.long)
+            data.original_node_labels = data.y.clone()
+      
+        fg = None
+        if return_graphs or with_lbp or with_nmf or (with_ss and y is not None):
+            fg = FactorGraph(pb)
+      
+        if with_lbp:
+            data.lbp_edges = LBPEdges(fg)
+      
+        if with_nmf:
+            data.nmf_edges = NMFEdges(fg)
+      
+        if with_ss and y is not None:
+            data.y_ss = torch.from_numpy(
+                x2ss(data.y.cpu().numpy().astype(int), fg)
+            ).to(torch.float32)
+      
+        if return_graphs:
+            return data, fg, vcg
+      
+        return data
+
     def _build_bipartite_example(self, idx):
         with open(self.file_lines[idx], "rb") as f:
             graph = pickle.load(f)
 
         node_labels = self._load_node_labels(idx, graph)
 
-        pb = self._networkx_mis_to_bpropy_mis(graph)
+        #pb = self._networkx_mis_to_bpropy_mis(graph)
+        pb = MIS(graph)
 
         try:
             from bpropy.adapters.vc_to_data import problem_to_data
@@ -279,10 +415,9 @@ class MISDataset(torch.utils.data.Dataset):
             or self.bipartite_return_vc_graph
         )
 
-        out = problem_to_data(
+        out = mis_to_bipartite_data(
             pb,
-            y=y,
-            hetero=False,
+            y=y.numpy(),
             with_lbp=self.bipartite_with_lbp,
             with_nmf=self.bipartite_with_nmf,
             with_ss=self.bipartite_with_ss,
@@ -323,14 +458,30 @@ class MISDataset(torch.utils.data.Dataset):
         }
 
         return data, sidecars
+
     def __getitem__(self, idx):
-        num_nodes, node_labels, edge_index = self.get_example(idx)
-        graph_data = GraphData(x=torch.from_numpy(node_labels),
-                               edge_index=torch.from_numpy(edge_index))
+        example = self.get_example(idx)
   
+        if self.input_representation == "bipartite":
+            point_indicator = torch.tensor(
+                [int(example.original_num_nodes.item())],
+                dtype=torch.long,
+            )
+            return (
+                torch.LongTensor(np.array([idx], dtype=np.int64)),
+                example,
+                point_indicator,
+            )
+  
+        num_nodes, node_labels, edge_index = example
+        graph_data = GraphData(
+            x=torch.from_numpy(node_labels),
+            edge_index=torch.from_numpy(edge_index),
+        )
         point_indicator = np.array([num_nodes], dtype=np.int64)
         return (
             torch.LongTensor(np.array([idx], dtype=np.int64)),
             graph_data,
             torch.from_numpy(point_indicator).long(),
         )
+
