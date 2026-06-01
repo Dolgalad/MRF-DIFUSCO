@@ -100,42 +100,109 @@ class MISModel(COMetaModel):
     loss = loss_func(x0_pred, node_labels)
     self.log("train/loss", loss)
     return loss
+  def _get_mis_variable_labels(self, graph_data):
+    is_bipartite = (
+      hasattr(graph_data, "variable_mask")
+      and hasattr(graph_data, "constraint_mask")
+    )
+
+    if is_bipartite:
+      variable_mask = graph_data.variable_mask.bool()
+      labels = graph_data.x[variable_mask].reshape(-1)
+      return labels, variable_mask
+
+    labels = graph_data.x.reshape(-1)
+    return labels, None
 
   def gaussian_training_step(self, batch, batch_idx):
     _, graph_data, point_indicator = batch
-    t = np.random.randint(1, self.diffusion.T + 1, point_indicator.shape[0]).astype(int)
-    node_labels = graph_data.x
+  
     edge_index = graph_data.edge_index
-    device = node_labels.device
-
-    # Sample from diffusion
+    device = graph_data.x.device
+  
+    is_bipartite = (
+        hasattr(graph_data, "variable_mask")
+        and hasattr(graph_data, "constraint_mask")
+    )
+  
+    if is_bipartite:
+      variable_mask = graph_data.variable_mask.bool().to(device)
+  
+      # Diffusion labels are only the variable-node labels.
+      node_labels = graph_data.x[variable_mask].reshape(-1).to(device)
+  
+      # For now assume batch_size=1 in the smoke test.
+      point_indicator = variable_mask.sum().view(1)
+    else:
+      variable_mask = None
+      node_labels = graph_data.x.reshape(-1).to(device)
+  
+    t = np.random.randint(
+        1,
+        self.diffusion.T + 1,
+        point_indicator.shape[0],
+    ).astype(int)
+  
     node_labels = node_labels.float() * 2 - 1
     node_labels = node_labels * (1.0 + 0.05 * torch.rand_like(node_labels))
     node_labels = node_labels.unsqueeze(1).unsqueeze(1)
-
+  
     t = torch.from_numpy(t).long()
     t = t.repeat_interleave(point_indicator.reshape(-1).cpu(), dim=0).numpy()
+  
     xt, epsilon = self.diffusion.sample(node_labels, t)
-
-    t = torch.from_numpy(t).float()
-    t = t.reshape(-1)
-    xt = xt.reshape(-1)
+  
     edge_index = edge_index.to(device).reshape(2, -1)
-    epsilon = epsilon.reshape(-1)
-
-    # Denoise
-    epsilon_pred = self.forward(
-        xt.float().to(device),
-        t.float().to(device),
-        edge_index,
-    )
-    epsilon_pred = epsilon_pred.squeeze(1)
-
-    # Compute loss
-    loss = F.mse_loss(epsilon_pred, epsilon.float())
+  
+    if is_bipartite:
+      # xt has shape [num_variable_nodes, 1, 1]
+      # but self.forward needs one value per graph node.
+      xt = xt.reshape(-1).to(device)
+      epsilon = epsilon.reshape(-1).to(device)
+  
+      t_tensor = torch.from_numpy(t).float().to(device).reshape(-1)
+  
+      # Start from graph_data.x so constraint-node features are preserved.
+      xt_full = graph_data.x.clone().float().reshape(-1).to(device)
+  
+      # Replace only variable nodes by the noisy diffusion state.
+      xt_full[variable_mask] = xt
+  
+      # Timestep vector must also have one value per graph node.
+      t_full = torch.zeros(
+          graph_data.x.shape[0],
+          device=device,
+          dtype=t_tensor.dtype,
+      )
+      t_full[variable_mask] = t_tensor
+  
+      # Forward on the full bipartite graph.
+      epsilon_pred_full = self.forward(
+          xt_full.float(),
+          t_full.float(),
+          edge_index,
+      )
+  
+      # Loss only on variable nodes.
+      epsilon_pred = epsilon_pred_full[variable_mask].reshape(-1)
+  
+      loss = F.mse_loss(epsilon_pred, epsilon.float())
+  
+    else:
+      xt = xt.reshape(-1).to(device)
+      epsilon = epsilon.reshape(-1).to(device)
+      t_tensor = torch.from_numpy(t).float().to(device).reshape(-1)
+  
+      epsilon_pred = self.forward(
+          xt.float(),
+          t_tensor.float(),
+          edge_index,
+      ).reshape(-1)
+  
+      loss = F.mse_loss(epsilon_pred, epsilon.float())
+  
     self.log("train/loss", loss)
     return loss
-
   def training_step(self, batch, batch_idx):
     if self.diffusion_type == 'gaussian':
       return self.gaussian_training_step(batch, batch_idx)

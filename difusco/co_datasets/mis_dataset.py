@@ -64,7 +64,7 @@ class MISDataset(torch.utils.data.Dataset):
         if self.input_representation == "bipartite":
             self._init_bipartite_cache_dir()
         print(
-                f'Loaded "{data_file}" with {len(self.file_lines)} examples'
+                f'Loaded "{data_file}" with {len(self.file_lines)} examples '
                 f'using input_representation="{self.input_representation}"'
         )
 
@@ -305,6 +305,7 @@ class MISDataset(torch.utils.data.Dataset):
         return node_labels
 
     def mis_to_bipartite_data(
+        self,
         pb,
         *,
         y=None,
@@ -385,7 +386,7 @@ class MISDataset(torch.utils.data.Dataset):
             data.y_ss = torch.from_numpy(
                 x2ss(data.y.cpu().numpy().astype(int), fg)
             ).to(torch.float32)
-      
+
         if return_graphs:
             return data, fg, vcg
       
@@ -415,7 +416,7 @@ class MISDataset(torch.utils.data.Dataset):
             or self.bipartite_return_vc_graph
         )
 
-        out = mis_to_bipartite_data(
+        out = self.mis_to_bipartite_data(
             pb,
             y=y.numpy(),
             with_lbp=self.bipartite_with_lbp,
