@@ -27,14 +27,41 @@ class MISModel(COMetaModel):
     self.train_dataset = MISDataset(
         data_file=os.path.join(self.args.storage_path, self.args.training_split),
         data_label_dir=data_label_dir,
+        input_representation=self.args.input_representation,
+        bipartite_cache_dir=self.args.bipartite_cache_dir,
+        bipartite_cache_version=self.args.bipartite_cache_version,
+        bipartite_cache_refresh=self.args.bipartite_cache_refresh,
+        bipartite_with_lbp=self.args.bipartite_with_lbp,
+        bipartite_with_nmf=self.args.bipartite_with_nmf,
+        bipartite_with_ss=self.args.bipartite_with_ss,
+        bipartite_return_factor_graph=self.args.bipartite_return_factor_graph,
+        bipartite_return_vc_graph=self.args.bipartite_return_vc_graph,
     )
 
     self.test_dataset = MISDataset(
         data_file=os.path.join(self.args.storage_path, self.args.test_split),
+        input_representation=self.args.input_representation,
+        bipartite_cache_dir=self.args.bipartite_cache_dir,
+        bipartite_cache_version=self.args.bipartite_cache_version,
+        bipartite_cache_refresh=self.args.bipartite_cache_refresh,
+        bipartite_with_lbp=self.args.bipartite_with_lbp,
+        bipartite_with_nmf=self.args.bipartite_with_nmf,
+        bipartite_with_ss=self.args.bipartite_with_ss,
+        bipartite_return_factor_graph=self.args.bipartite_return_factor_graph,
+        bipartite_return_vc_graph=self.args.bipartite_return_vc_graph,
     )
 
     self.validation_dataset = MISDataset(
         data_file=os.path.join(self.args.storage_path, self.args.validation_split),
+        input_representation=self.args.input_representation,
+        bipartite_cache_dir=self.args.bipartite_cache_dir,
+        bipartite_cache_version=self.args.bipartite_cache_version,
+        bipartite_cache_refresh=self.args.bipartite_cache_refresh,
+        bipartite_with_lbp=self.args.bipartite_with_lbp,
+        bipartite_with_nmf=self.args.bipartite_with_nmf,
+        bipartite_with_ss=self.args.bipartite_with_ss,
+        bipartite_return_factor_graph=self.args.bipartite_return_factor_graph,
+        bipartite_return_vc_graph=self.args.bipartite_return_vc_graph,
     )
 
   def forward(self, x, t, edge_index):

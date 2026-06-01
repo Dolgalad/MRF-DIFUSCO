@@ -64,8 +64,67 @@ def arg_parser():
   parser.add_argument('--do_test', action='store_true')
   parser.add_argument('--do_valid_only', action='store_true')
 
-  parser.add_argument("--input_representation", type=str, default="original", choices=["original", "bipartite"], help="Input representation passed to the model. 'original' preserves the default DIFUSCO graph input, 'bipartite' uses the variable-constraint bipartite representation")
+  parser.add_argument(
+      "--input_representation",
+      type=str,
+      default="original",
+      choices=["original", "bipartite"],
+      help=(
+          "Input representation passed to the model. "
+          "'original' preserves the default DIFUSCO graph input; "
+          "'bipartite' uses the variable-constraint bipartite representation."
+      ),
+  )
 
+  parser.add_argument(
+      "--bipartite_cache_dir",
+      type=str,
+      default=None,
+      help="Directory used to cache preprocessed bipartite MIS inputs.",
+  )
+  
+  parser.add_argument(
+      "--bipartite_cache_version",
+      type=str,
+      default="v1",
+      help="Version tag for bipartite preprocessing cache invalidation.",
+  )
+  
+  parser.add_argument(
+      "--bipartite_cache_refresh",
+      action="store_true",
+      help="Recompute bipartite preprocessing even if cache files exist.",
+  )
+  
+  parser.add_argument(
+      "--bipartite_with_lbp",
+      action="store_true",
+      help="Store LBP message-passing edges in cached bipartite data.",
+  )
+  
+  parser.add_argument(
+      "--bipartite_with_nmf",
+      action="store_true",
+      help="Store NMF message-passing edges in cached bipartite data.",
+  )
+  
+  parser.add_argument(
+      "--bipartite_with_ss",
+      action="store_true",
+      help="Store sufficient-statistics targets for the bipartite factor graph.",
+  )
+  
+  parser.add_argument(
+      "--bipartite_return_factor_graph",
+      action="store_true",
+      help="Store the bpropy FactorGraph as a cache sidecar.",
+  )
+  
+  parser.add_argument(
+      "--bipartite_return_vc_graph",
+      action="store_true",
+      help="Store the bpropy variable-constraint graph as a cache sidecar.",
+  )
 
   args = parser.parse_args()
   return args
