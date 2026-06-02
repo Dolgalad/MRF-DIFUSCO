@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=mis_diffusion_graph_gaussian_er_700_800_5000_bipartite
+#SBATCH --job-name=mis_diffusion_graph_gaussian_er_700_800_5000_bipartite_new_features
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=32G
@@ -36,7 +36,7 @@ PY
 
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
-JOBNAME="mis_diffusion_graph_gaussian_er_700_800_5000_bipartite"
+JOBNAME="mis_diffusion_graph_gaussian_er_700_800_5000_bipartite_new_features"
 DATA_ROOT="$HOME/DIFUSCO/data/mis_er_700_800_5000"
 STORAGE_ROOT="$HOME/DIFUSCO/outputs/$JOBNAME"
 BIPARTITE_CACHE_DIR="/tmp/mis_er_700_800_5000_cache"

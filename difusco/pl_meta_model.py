@@ -43,6 +43,7 @@ class COMetaModel(pl.LightningModule):
         sparse=self.sparse,
         use_activation_checkpoint=self.args.use_activation_checkpoint,
         node_feature_only=node_feature_only,
+        input_node_dim = 2 if self.args.input_representation == "bipartite" else 1,
     )
     self.num_training_steps_cached = None
 

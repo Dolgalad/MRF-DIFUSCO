@@ -291,17 +291,31 @@ class GNNEncoder(nn.Module):
   """Configurable GNN Encoder
   """
 
-  def __init__(self, n_layers, hidden_dim, out_channels=1, aggregation="sum", norm="layer",
-               learn_norm=True, track_norm=False, gated=True,
-               sparse=False, use_activation_checkpoint=False, node_feature_only=False,
+  def __init__(self, n_layers, hidden_dim, 
+               out_channels=1, 
+               aggregation="sum", 
+               norm="layer",
+               learn_norm=True, 
+               track_norm=False, 
+               gated=True,
+               sparse=False, 
+               use_activation_checkpoint=False, 
+               node_feature_only=False, 
+               input_node_dim=1,
                *args, **kwargs):
     super(GNNEncoder, self).__init__()
     self.sparse = sparse
     self.node_feature_only = node_feature_only
     self.hidden_dim = hidden_dim
+    self.input_node_dim = input_node_dim
     time_embed_dim = hidden_dim // 2
     self.node_embed = nn.Linear(hidden_dim, hidden_dim)
     self.edge_embed = nn.Linear(hidden_dim, hidden_dim)
+
+    if self.input_node_dim > 1:
+        self.extra_node_embed = nn.Linear(self.input_node_dim - 1, hidden_dim)
+    else:
+        self.extra_node_embed = None
 
     if not node_feature_only:
       self.pos_embed = PositionEmbeddingSine(hidden_dim // 2, normalize=True)
@@ -402,7 +416,23 @@ class GNNEncoder(nn.Module):
     return e
 
   def sparse_forward_node_feature_only(self, x, timesteps, edge_index):
-    x = self.node_embed(self.pos_embed(x))
+    #x = self.node_embed(self.pos_embed(x))
+    x_raw = x
+    if x_raw.dim() == 1:
+        x_raw = x_raw.unsqueeze(-1)
+    if x_raw.size(-1) != self.input_node_dim:
+        raise ValueError(
+                f"Expected node features with dimension {self.input_node_dim}, "
+                f"got shape {tuple(x_raw.shape)}"
+                )
+    assignment = x_raw[:, 0]
+    x = self.node_embed(self.pos_embed(assignment))
+
+    if self.input_node_dim > 1:
+        extra = x_raw[:,1:]
+        x = x + self.extra_node_embed(extra)
+
+
     x_shape = x.shape
     e = torch.zeros(edge_index.size(1), self.hidden_dim, device=x.device)
     time_emb = self.time_embed(timestep_embedding(timesteps, self.hidden_dim))

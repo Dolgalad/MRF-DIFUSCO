@@ -115,6 +115,95 @@ class MISModel(COMetaModel):
     labels = graph_data.x.reshape(-1)
     return labels, None
 
+  #def _fill_bipartite_constraint_values(
+  #    self,
+  #    assignment_values,
+  #    edge_index,
+  #    variable_mask,
+  #    constraint_mask,
+  #):
+  #    """Set constraint-node assignment values to the sum of neighboring variables.
+  #
+  #    Assumes a bipartite variable-constraint graph.
+  #
+  #    assignment_values:
+  #      shape [num_nodes]
+  #      contains current assignment/noisy assignment values for variable nodes.
+  #
+  #    Returns:
+  #      shape [num_nodes]
+  #      same as assignment_values, but constraint nodes are overwritten with
+  #      the sum of adjacent variable assignment values.
+  #    """
+  #    assignment_values = assignment_values.reshape(-1)
+  #    variable_mask = variable_mask.bool().reshape(-1).to(assignment_values.device)
+  #    constraint_mask = constraint_mask.bool().reshape(-1).to(assignment_values.device)
+  #    edge_index = edge_index.long().to(assignment_values.device)
+  #
+  #    src, dst = edge_index[0], edge_index[1]
+  #
+  #    src_is_var = variable_mask[src]
+  #    dst_is_var = variable_mask[dst]
+  #    src_is_con = constraint_mask[src]
+  #    dst_is_con = constraint_mask[dst]
+  #
+  #    # Directed messages from variable nodes to constraint nodes.
+  #    var_to_con = src_is_var & dst_is_con
+  #    con_to_var = src_is_con & dst_is_var
+  #
+  #    variable_nodes = torch.cat([src[var_to_con], dst[con_to_var]], dim=0)
+  #    constraint_nodes = torch.cat([dst[var_to_con], src[con_to_var]], dim=0)
+  #
+  #    constraint_values = torch.zeros_like(assignment_values)
+  #    constraint_values.index_add_(
+  #        0,
+  #        constraint_nodes,
+  #        assignment_values[variable_nodes],
+  #    )
+  #
+  #    out = assignment_values.clone()
+  #    out[constraint_mask] = constraint_values[constraint_mask]
+  #    return out
+
+  def _fill_bipartite_constraint_values(
+    self,
+    assignment_values,
+    edge_index,
+    variable_mask,
+    constraint_mask,
+  ):
+    assignment_values = assignment_values.reshape(-1)
+    device = assignment_values.device
+
+    variable_mask = variable_mask.bool().reshape(-1).to(device)
+    constraint_mask = constraint_mask.bool().reshape(-1).to(device)
+    edge_index = edge_index.long().to(device)
+
+    src, dst = edge_index[0], edge_index[1]
+
+    # Keep only edges oriented variable -> constraint.
+    keep = variable_mask[src] & constraint_mask[dst]
+
+    variable_nodes = src[keep]
+    constraint_nodes = dst[keep]
+
+    # If edge_index was only constraint -> variable, fall back to that orientation.
+    if variable_nodes.numel() == 0:
+        keep = constraint_mask[src] & variable_mask[dst]
+        variable_nodes = dst[keep]
+        constraint_nodes = src[keep]
+
+    constraint_values = torch.zeros_like(assignment_values)
+    constraint_values.index_add_(
+        0,
+        constraint_nodes,
+        assignment_values[variable_nodes],
+    )
+
+    out = assignment_values.clone()
+    out[constraint_mask] = constraint_values[constraint_mask]
+    return out
+
   def gaussian_training_step(self, batch, batch_idx):
     _, graph_data, point_indicator = batch
   
@@ -207,16 +296,48 @@ class MISModel(COMetaModel):
           t_tensor,
       )
       
+      #xt = xt.reshape(-1).to(device=device, dtype=graph_data.x.dtype)
+      #epsilon = epsilon.reshape(-1).to(device=device, dtype=graph_data.x.dtype)
+      #
+      #xt_full = graph_data.x.clone().float().reshape(-1).to(device)
+      #xt_full[variable_mask] = xt
+      #
+      #t_full = t_per_graph[graph_batch]
+      #
+      #epsilon_pred_full = self.forward(
+      #    xt_full.float(),
+      #    t_full.float(),
+      #    edge_index,
+      #)
+
       xt = xt.reshape(-1).to(device=device, dtype=graph_data.x.dtype)
       epsilon = epsilon.reshape(-1).to(device=device, dtype=graph_data.x.dtype)
+
+      xt_full_assignment = graph_data.x.clone().float().reshape(-1).to(device)
+      xt_full_assignment[variable_mask] = xt
+
+      xt_full_assignment = self._fill_bipartite_constraint_values(
+              assignment_values=xt_full_assignment,
+              edge_index=graph_data.edge_index,
+              variable_mask=graph_data.variable_mask,
+              constraint_mask=graph_data.constraint_mask,
+      )
+
       
-      xt_full = graph_data.x.clone().float().reshape(-1).to(device)
-      xt_full[variable_mask] = xt
+      node_type = graph_data.constraint_mask.float().reshape(-1).to(device)
+      
+      # Bipartite node feature layout:
+      #   x[:, 0] = assignment-like diffusion value
+      #   x[:, 1] = node type indicator, 0 for variables and 1 for constraints
+      x_features = torch.stack(
+          [xt_full_assignment, node_type],
+          dim=-1,
+      )
       
       t_full = t_per_graph[graph_batch]
       
       epsilon_pred_full = self.forward(
-          xt_full.float(),
+          x_features.float(),
           t_full.float(),
           edge_index,
       )
@@ -510,18 +631,52 @@ class MISModel(COMetaModel):
       # The model input timestep still needs to live on the model/device.
       t_model = t_cpu.float().to(device)
 
-      xt_full = x_template.clone().float().reshape(-1).to(device)
-      xt_full[variable_mask] = xt_variables.float().reshape(-1).to(device)
+      #xt_full = x_template.clone().float().reshape(-1).to(device)
+      #xt_full[variable_mask] = xt_variables.float().reshape(-1).to(device)
 
+      #t_full = torch.zeros(
+      #    xt_full.shape[0],
+      #    device=device,
+      #    dtype=t_model.dtype,
+      #)
+      #t_full[variable_mask] = t_model
+
+      #pred_full = self.forward(
+      #    xt_full.float(),
+      #    t_full.float(),
+      #    edge_index.long().to(device),
+      #)
+      xt_full_assignment = x_template.clone().float().reshape(-1).to(device)
+      xt_full_assignment[variable_mask] = xt_variables.float().reshape(-1).to(device)
+
+      constraint_mask = ~variable_mask
+
+      xt_full_assignment = self._fill_bipartite_constraint_values(
+          assignment_values=xt_full_assignment,
+          edge_index=edge_index,
+          variable_mask=variable_mask,
+          constraint_mask=constraint_mask,
+      )
+      
+      node_type = (~variable_mask).float().reshape(-1).to(device)
+      
+      # Bipartite node feature layout:
+      #   x[:, 0] = assignment-like diffusion value
+      #   x[:, 1] = node type indicator, 0 for variables and 1 for constraints
+      x_features = torch.stack(
+          [xt_full_assignment, node_type],
+          dim=-1,
+      )
+      
       t_full = torch.zeros(
-          xt_full.shape[0],
+          xt_full_assignment.shape[0],
           device=device,
           dtype=t_model.dtype,
       )
       t_full[variable_mask] = t_model
-
+      
       pred_full = self.forward(
-          xt_full.float(),
+          x_features.float(),
           t_full.float(),
           edge_index.long().to(device),
       )
