@@ -296,20 +296,6 @@ class MISModel(COMetaModel):
           t_tensor,
       )
       
-      #xt = xt.reshape(-1).to(device=device, dtype=graph_data.x.dtype)
-      #epsilon = epsilon.reshape(-1).to(device=device, dtype=graph_data.x.dtype)
-      #
-      #xt_full = graph_data.x.clone().float().reshape(-1).to(device)
-      #xt_full[variable_mask] = xt
-      #
-      #t_full = t_per_graph[graph_batch]
-      #
-      #epsilon_pred_full = self.forward(
-      #    xt_full.float(),
-      #    t_full.float(),
-      #    edge_index,
-      #)
-
       xt = xt.reshape(-1).to(device=device, dtype=graph_data.x.dtype)
       epsilon = epsilon.reshape(-1).to(device=device, dtype=graph_data.x.dtype)
 
@@ -335,6 +321,28 @@ class MISModel(COMetaModel):
       )
       
       t_full = t_per_graph[graph_batch]
+
+      num_nodes = xt_full.numel()
+      ei = edge_index
+      
+      if ei.numel() == 0:
+          raise RuntimeError("Empty edge_index in bipartite batch.")
+      
+      bad = (
+          ei.min().item() < 0
+          or ei.max().item() >= num_nodes
+      )
+      
+      if bad:
+          raise RuntimeError(
+              "Invalid bipartite edge_index before forward: "
+              f"num_nodes={num_nodes}, "
+              f"edge_min={ei.min().item()}, "
+              f"edge_max={ei.max().item()}, "
+              f"x_shape={tuple(xt_full.shape)}, "
+              f"graph_data.x_shape={tuple(graph_data.x.shape)}, "
+              f"batch_size={batch_size}"
+          )
       
       epsilon_pred_full = self.forward(
           x_features.float(),

@@ -16,6 +16,37 @@ from torch_geometric.data import Data as GraphData
 
 from bpropy.co.mis import MIS
 
+class BipartiteMISData(GraphData):
+    """PyG Data object with correct batching offsets for MIS bipartite input.
+
+    edge_index lives in the full variable-constraint node space.
+
+    graph_edge_index lives in the original variable-node graph space, so when
+    PyG batches several examples, it must be incremented by the number of
+    variables, not by the total number of bipartite nodes.
+    """
+
+    def __inc__(self, key, value, *args, **kwargs):
+        if key == "edge_index":
+            return self.num_nodes
+
+        if key == "graph_edge_index":
+            if hasattr(self, "variable_mask"):
+                return int(self.variable_mask.sum().item())
+
+            if hasattr(self, "original_num_nodes"):
+                original_num_nodes = self.original_num_nodes
+                if torch.is_tensor(original_num_nodes):
+                    return int(original_num_nodes.item())
+                return int(original_num_nodes)
+
+            raise RuntimeError(
+                "Cannot batch graph_edge_index without variable_mask "
+                "or original_num_nodes."
+            )
+
+        return super().__inc__(key, value, *args, **kwargs)
+
 @contextmanager
 def file_lock(lock_path):
     """Simple process-level file lock for cache writes."""
@@ -357,7 +388,7 @@ class MISDataset(torch.utils.data.Dataset):
             y_tensor = y_tensor.to(torch.float32).view(-1, 1)
             x[: y_tensor.shape[0]] = y_tensor
       
-        data = Data(
+        data = BipartiteMISData(
             x=x,
             edge_index=edge_index,
             graph_edge_index=graph_edge_index,
@@ -477,7 +508,7 @@ class MISDataset(torch.utils.data.Dataset):
             )
   
         num_nodes, node_labels, edge_index = example
-        graph_data = GraphData(
+        graph_data = BipartiteMISData(
             x=torch.from_numpy(node_labels),
             edge_index=torch.from_numpy(edge_index),
         )
