@@ -68,39 +68,164 @@ class MISModel(COMetaModel):
   def forward(self, x, t, edge_index):
     return self.model(x, t, edge_index=edge_index)
 
+  #def categorical_training_step(self, batch, batch_idx):
+  #  _, graph_data, point_indicator = batch
+  #  t = np.random.randint(1, self.diffusion.T + 1, point_indicator.shape[0]).astype(int)
+  #  node_labels = graph_data.x
+  #  edge_index = graph_data.edge_index
+
+  #  # Sample from diffusion
+  #  node_labels_onehot = F.one_hot(node_labels.long(), num_classes=2).float()
+  #  node_labels_onehot = node_labels_onehot.unsqueeze(1).unsqueeze(1)
+
+  #  t = torch.from_numpy(t).long()
+  #  t = t.repeat_interleave(point_indicator.reshape(-1).cpu(), dim=0).numpy()
+
+  #  xt = self.diffusion.sample(node_labels_onehot, t)
+  #  xt = xt * 2 - 1
+  #  xt = xt * (1.0 + 0.05 * torch.rand_like(xt))
+
+  #  t = torch.from_numpy(t).float()
+  #  t = t.reshape(-1)
+  #  xt = xt.reshape(-1)
+  #  edge_index = edge_index.to(node_labels.device).reshape(2, -1)
+
+  #  # Denoise
+  #  x0_pred = self.forward(
+  #      xt.float().to(node_labels.device),
+  #      t.float().to(node_labels.device),
+  #      edge_index,
+  #  )
+
+  #  loss_func = nn.CrossEntropyLoss()
+  #  loss = loss_func(x0_pred, node_labels)
+  #  self.log("train/loss", loss)
+  #  return loss
   def categorical_training_step(self, batch, batch_idx):
-    _, graph_data, point_indicator = batch
-    t = np.random.randint(1, self.diffusion.T + 1, point_indicator.shape[0]).astype(int)
-    node_labels = graph_data.x
-    edge_index = graph_data.edge_index
-
-    # Sample from diffusion
-    node_labels_onehot = F.one_hot(node_labels.long(), num_classes=2).float()
-    node_labels_onehot = node_labels_onehot.unsqueeze(1).unsqueeze(1)
-
-    t = torch.from_numpy(t).long()
-    t = t.repeat_interleave(point_indicator.reshape(-1).cpu(), dim=0).numpy()
-
-    xt = self.diffusion.sample(node_labels_onehot, t)
-    xt = xt * 2 - 1
-    xt = xt * (1.0 + 0.05 * torch.rand_like(xt))
-
-    t = torch.from_numpy(t).float()
-    t = t.reshape(-1)
-    xt = xt.reshape(-1)
-    edge_index = edge_index.to(node_labels.device).reshape(2, -1)
-
-    # Denoise
-    x0_pred = self.forward(
-        xt.float().to(node_labels.device),
-        t.float().to(node_labels.device),
-        edge_index,
-    )
-
-    loss_func = nn.CrossEntropyLoss()
-    loss = loss_func(x0_pred, node_labels)
-    self.log("train/loss", loss)
-    return loss
+      _, graph_data, point_indicator = batch
+  
+      device = graph_data.x.device
+      edge_index = graph_data.edge_index.to(device).reshape(2, -1)
+  
+      is_bipartite = (
+          hasattr(graph_data, "variable_mask")
+          and hasattr(graph_data, "constraint_mask")
+      )
+  
+      if is_bipartite:
+          variable_mask = graph_data.variable_mask.bool().to(device)
+          constraint_mask = graph_data.constraint_mask.bool().to(device)
+  
+          if not hasattr(graph_data, "batch"):
+              raise AttributeError(
+                  "Batched bipartite graph_data is missing graph_data.batch. "
+                  "This is needed to assign one diffusion timestep per graph."
+              )
+  
+          graph_batch = graph_data.batch.to(device)
+          variable_batch = graph_batch[variable_mask]
+          batch_size = int(graph_batch.max().item()) + 1
+  
+          # Labels are only variable-node labels.
+          node_labels = graph_data.x[variable_mask].reshape(-1).long().to(device)
+  
+          # One diffusion timestep per graph, expanded to variable nodes.
+          point_indicator = torch.bincount(
+              variable_batch,
+              minlength=batch_size,
+          )
+  
+          t_per_graph_np = np.random.randint(
+              1,
+              self.diffusion.T + 1,
+              batch_size,
+          ).astype(int)
+  
+          t_variables_np = np.repeat(
+              t_per_graph_np,
+              point_indicator.reshape(-1).cpu().numpy(),
+          )
+  
+          node_labels_onehot = F.one_hot(
+              node_labels.long(),
+              num_classes=2,
+          ).float()
+  
+          node_labels_onehot = node_labels_onehot.unsqueeze(1).unsqueeze(1)
+  
+          # xt_variables is binary, shape [num_variable_nodes].
+          xt_variables = self.diffusion.sample(
+              node_labels_onehot,
+              t_variables_np,
+          )
+  
+          xt_variables = xt_variables.reshape(-1).long().to(device)
+  
+          x_features = self._build_bipartite_node_features(
+              x_template=graph_data.x,
+              variable_values=xt_variables.float(),
+              variable_mask=variable_mask,
+              constraint_mask=constraint_mask,
+              edge_index=edge_index,
+          )
+  
+          # Give every node in a graph the same timestep, including constraints.
+          t_per_graph = torch.from_numpy(t_per_graph_np).float().to(device)
+          t_full = t_per_graph[graph_batch].reshape(-1)
+  
+          x0_pred_full = self.forward(
+              x_features.float(),
+              t_full.float(),
+              edge_index,
+          )
+  
+          x0_pred_variables = x0_pred_full[variable_mask].reshape(-1, 2)
+  
+          loss = F.cross_entropy(
+              x0_pred_variables,
+              node_labels,
+          )
+  
+      else:
+          t = np.random.randint(
+              1,
+              self.diffusion.T + 1,
+              point_indicator.shape[0],
+          ).astype(int)
+  
+          node_labels = graph_data.x.reshape(-1).long().to(device)
+  
+          node_labels_onehot = F.one_hot(
+              node_labels.long(),
+              num_classes=2,
+          ).float()
+  
+          node_labels_onehot = node_labels_onehot.unsqueeze(1).unsqueeze(1)
+  
+          t = torch.from_numpy(t).long()
+          t = t.repeat_interleave(
+              point_indicator.reshape(-1).cpu(),
+              dim=0,
+          ).numpy()
+  
+          xt = self.diffusion.sample(node_labels_onehot, t)
+          xt = xt.reshape(-1).long().to(device)
+  
+          t = torch.from_numpy(t).float().to(device).reshape(-1)
+  
+          x0_pred = self.forward(
+              xt.float(),
+              t.float(),
+              edge_index,
+          )
+  
+          loss = F.cross_entropy(
+              x0_pred.reshape(-1, 2),
+              node_labels,
+          )
+  
+      self.log("train/loss", loss)
+      return loss
   def _get_mis_variable_labels(self, graph_data):
     is_bipartite = (
       hasattr(graph_data, "variable_mask")
@@ -204,6 +329,49 @@ class MISModel(COMetaModel):
     out[constraint_mask] = constraint_values[constraint_mask]
     return out
 
+  def _build_bipartite_node_features(
+      self,
+      x_template,
+      variable_values,
+      variable_mask,
+      constraint_mask,
+      edge_index,
+  ):
+      """Build full node features for a bipartite MIS graph.
+  
+      variable_values contains the current noisy/diffused values only for
+      variable nodes. Constraint-node values are reconstructed from the
+      neighboring variable values.
+  
+      Feature layout:
+        x[:, 0] = assignment-like value
+        x[:, 1] = node type, 0 for variables and 1 for constraints
+      """
+      device = variable_values.device
+  
+      variable_mask = variable_mask.bool().reshape(-1).to(device)
+      constraint_mask = constraint_mask.bool().reshape(-1).to(device)
+      edge_index = edge_index.long().to(device)
+  
+      x_full_assignment = x_template.clone().float().reshape(-1).to(device)
+      x_full_assignment[variable_mask] = variable_values.float().reshape(-1)
+  
+      x_full_assignment = self._fill_bipartite_constraint_values(
+          assignment_values=x_full_assignment,
+          edge_index=edge_index,
+          variable_mask=variable_mask,
+          constraint_mask=constraint_mask,
+      )
+  
+      node_type = constraint_mask.float().reshape(-1)
+  
+      x_features = torch.stack(
+          [x_full_assignment, node_type],
+          dim=-1,
+      )
+  
+      return x_features
+
   def gaussian_training_step(self, batch, batch_idx):
     _, graph_data, point_indicator = batch
   
@@ -267,22 +435,6 @@ class MISModel(COMetaModel):
     edge_index = edge_index.to(device).reshape(2, -1)
   
     if is_bipartite:
-      #t_per_graph_np = np.random.randint(
-      #    1,
-      #    self.diffusion.T + 1,
-      #    batch_size,
-      #).astype(int)
-
-      #t_variables_np = np.repeat(
-      #    t_per_graph_np,
-      #    point_indicator.cpu().numpy(),
-      #)
-
-      #xt, epsilon = self.diffusion.sample(node_labels, t_variables_np)
-
-      #t_tensor = torch.from_numpy(t_variables_np).float().to(device).reshape(-1)
-      #t_per_graph = torch.from_numpy(t_per_graph_np).float().to(device)
-
       t_tensor = torch.from_numpy(t).float().to(device).reshape(-1)
 
       t_per_graph = torch.zeros(
@@ -489,6 +641,10 @@ class MISModel(COMetaModel):
     for k, v in metrics.items():
       self.log(k, float(v), on_epoch=True, sync_dist=True)
 
+    print()
+    print("best_solved_cost = ", best_solved_cost)
+    print()
+
     self.log(
         f"{split}/solved_cost",
         float(best_solved_cost),
@@ -500,11 +656,6 @@ class MISModel(COMetaModel):
     return metrics
 
   def bipartite_test_step(self, batch, batch_idx, draw=False, split='test'):
-    if self.diffusion_type != 'gaussian':
-      raise NotImplementedError(
-          "Bipartite validation/test is currently implemented only for gaussian diffusion."
-      )
-
     real_batch_idx, graph_data, point_indicator = batch
     device = graph_data.x.device
 
@@ -515,6 +666,7 @@ class MISModel(COMetaModel):
       )
 
     variable_mask = graph_data.variable_mask.bool().to(device)
+    constraint_mask = graph_data.constraint_mask.bool().to(device)
     node_labels = graph_data.x[variable_mask].reshape(-1).to(device)
 
     model_edge_index = graph_data.edge_index.to(device).reshape(2, -1)
@@ -540,25 +692,48 @@ class MISModel(COMetaModel):
     num_variable_nodes = node_labels.shape[0]
 
     for _ in range(self.args.sequential_sampling):
-      xt = torch.randn_like(node_labels.float()).reshape(-1)
-      xt.requires_grad = True
+      if self.diffusion_type == "gaussian":
+        xt = torch.randn_like(node_labels.float()).reshape(-1)
+        xt.requires_grad = True
+      else:
+        xt = torch.randn_like(node_labels.float()).reshape(-1)
+        xt = (xt > 0).long()
 
       cur_model_edge_index = model_edge_index
       cur_variable_mask = variable_mask
       cur_x_template = graph_data.x.float().reshape(-1).to(device)
 
-      if self.args.parallel_sampling > 1:
-        xt = xt.repeat(self.args.parallel_sampling)
-        xt = torch.randn_like(xt)
-        xt.requires_grad = True
+      #if self.args.parallel_sampling > 1:
+      #  xt = xt.repeat(self.args.parallel_sampling)
+      #  xt = torch.randn_like(xt)
+      #  xt.requires_grad = True
 
+      #  cur_model_edge_index = self.duplicate_edge_index(
+      #      model_edge_index,
+      #      num_total_nodes,
+      #      device,
+      #  )
+      #  cur_variable_mask = variable_mask.repeat(self.args.parallel_sampling)
+      #  cur_x_template = cur_x_template.repeat(self.args.parallel_sampling)
+      if self.args.parallel_sampling > 1:
+        if self.diffusion_type == "gaussian":
+          xt = xt.repeat(self.args.parallel_sampling)
+          xt = torch.randn_like(xt)
+          xt.requires_grad = True
+        else:
+          xt = xt.repeat(self.args.parallel_sampling).long()
+    
         cur_model_edge_index = self.duplicate_edge_index(
             model_edge_index,
             num_total_nodes,
             device,
         )
+    
         cur_variable_mask = variable_mask.repeat(self.args.parallel_sampling)
+        cur_constraint_mask = constraint_mask.repeat(self.args.parallel_sampling)
         cur_x_template = cur_x_template.repeat(self.args.parallel_sampling)
+      else:
+        cur_constraint_mask = constraint_mask
 
       batch_size = 1
       steps = self.args.inference_diffusion_steps
@@ -573,18 +748,35 @@ class MISModel(COMetaModel):
         t1 = np.array([t1 for _ in range(batch_size)]).astype(int)
         t2 = np.array([t2 for _ in range(batch_size)]).astype(int)
 
-        xt = self.bipartite_gaussian_denoise_step(
-            xt_variables=xt,
-            t=t1,
-            device=device,
-            x_template=cur_x_template,
-            variable_mask=cur_variable_mask,
-            edge_index=cur_model_edge_index,
-            target_t=t2,
-        )
+        if self.diffusion_type == "gaussian":
+          xt = self.bipartite_gaussian_denoise_step(
+              xt_variables=xt,
+              t=t1,
+              device=device,
+              x_template=cur_x_template,
+              variable_mask=cur_variable_mask,
+              edge_index=cur_model_edge_index,
+              target_t=t2,
+          )
+        else:
+          xt = self.bipartite_categorical_denoise_step(
+              xt_variables=xt,
+              t=t1,
+              device=device,
+              x_template=cur_x_template,
+              variable_mask=cur_variable_mask,
+              constraint_mask=constraint_mask,
+              edge_index=cur_model_edge_index,
+              target_t=t2,
+          )
 
-      predict_labels = xt.float().cpu().detach().numpy() * 0.5 + 0.5
+      if self.diffusion_type == "gaussian":
+        predict_labels = xt.float().cpu().detach().numpy() * 0.5 + 0.5
+      else:
+        predict_labels = xt.float().cpu().detach().numpy() + 1e-6
       stacked_predict_labels.append(predict_labels)
+
+    print(xt)
 
     predict_labels = np.concatenate(stacked_predict_labels, axis=0)
     all_sampling = self.args.sequential_sampling * self.args.parallel_sampling
@@ -595,6 +787,7 @@ class MISModel(COMetaModel):
           f"Expected prediction length {num_variable_nodes}, got {sample.shape[0]}"
       )
 
+    print(predict_labels)
     solved_solutions = [
         mis_decode_np(predict_labels, adj_mat)
         for predict_labels in splitted_predict_labels
@@ -609,6 +802,10 @@ class MISModel(COMetaModel):
 
     for k, v in metrics.items():
       self.log(k, float(v), on_epoch=True, sync_dist=True)
+
+    print()
+    print(best_solved_cost)
+    print()
 
     self.log(
         f"{split}/solved_cost",
@@ -780,6 +977,60 @@ class MISModel(COMetaModel):
   #    self.log(k, v, on_epoch=True, sync_dist=True)
   #  self.log(f"{split}/solved_cost", best_solved_cost, prog_bar=True, on_epoch=True, sync_dist=True)
   #  return metrics
+
+  def bipartite_categorical_denoise_step(
+      self,
+      xt_variables,
+      t,
+      device,
+      x_template,
+      variable_mask,
+      constraint_mask,
+      edge_index,
+      target_t=None,
+  ):
+      with torch.no_grad():
+          t_cpu = torch.from_numpy(t).view(1)
+          t_model = t_cpu.float().to(device)
+  
+          xt_variables = xt_variables.reshape(-1).long().to(device)
+  
+          x_features = self._build_bipartite_node_features(
+              x_template=x_template,
+              variable_values=xt_variables.float(),
+              variable_mask=variable_mask,
+              constraint_mask=constraint_mask,
+              edge_index=edge_index,
+          )
+  
+          # Same timestep for all nodes in this sampled graph copy.
+          t_full = torch.full(
+              (x_features.shape[0],),
+              float(t_model.item()),
+              device=device,
+              dtype=torch.float32,
+          )
+  
+          x0_pred_full = self.forward(
+              x_features.float(),
+              t_full.float(),
+              edge_index.long().to(device),
+          )
+  
+          x0_pred_variables = x0_pred_full[variable_mask].reshape(-1, 2)
+  
+          x0_pred_prob = x0_pred_variables.reshape(
+              (1, xt_variables.shape[0], -1, 2)
+          ).softmax(dim=-1)
+  
+          xt_variables = self.categorical_posterior(
+              target_t,
+              t_cpu,
+              x0_pred_prob,
+              xt_variables,
+          )
+  
+          return xt_variables.reshape(-1).long()
 
   def validation_step(self, batch, batch_idx):
     return self.test_step(batch, batch_idx, split='val')
