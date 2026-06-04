@@ -322,9 +322,9 @@ class MISModel(COMetaModel):
       
       t_full = t_per_graph[graph_batch]
 
-      num_nodes = xt_full.numel()
-      ei = edge_index
+      num_nodes = x_features.shape[0]
       
+      ei = edge_index.long().to(device)
       if ei.numel() == 0:
           raise RuntimeError("Empty edge_index in bipartite batch.")
       
@@ -332,18 +332,17 @@ class MISModel(COMetaModel):
           ei.min().item() < 0
           or ei.max().item() >= num_nodes
       )
-      
       if bad:
           raise RuntimeError(
               "Invalid bipartite edge_index before forward: "
               f"num_nodes={num_nodes}, "
               f"edge_min={ei.min().item()}, "
               f"edge_max={ei.max().item()}, "
-              f"x_shape={tuple(xt_full.shape)}, "
+              f"x_features_shape={tuple(x_features.shape)}, "
+              f"xt_full_assignment_shape={tuple(xt_full_assignment.shape)}, "
               f"graph_data.x_shape={tuple(graph_data.x.shape)}, "
               f"batch_size={batch_size}"
-          )
-      
+          )      
       epsilon_pred_full = self.forward(
           x_features.float(),
           t_full.float(),

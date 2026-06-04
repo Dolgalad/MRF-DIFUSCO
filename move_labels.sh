@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export DATA_ROOT=/users/schulz/DIFUSCO/data/mis_er_700_800_20
+export DATA_ROOT=/users/schulz/DIFUSCO/data/mis_er_100_5000
 
 python - <<'PY'
 import os
