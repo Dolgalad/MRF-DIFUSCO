@@ -63,44 +63,51 @@ class MISModel(COMetaModel):
         bipartite_return_factor_graph=self.args.bipartite_return_factor_graph,
         bipartite_return_vc_graph=self.args.bipartite_return_vc_graph,
     )
+  def _use_mrf_inference(self):
+    return getattr(self.args, "mrf_inference", "none") not in (None, "none", "off", "")
+
+
+  def forward_mrf_marginals(
+      self,
+      x,
+      t,
+      edge_index,
+      graph_data,
+      variable_mask,
+  ):
+      raw_params = self.forward(x, t, edge_index)
+  
+      # Only variable nodes correspond to MIS variables.
+      variable_params = raw_params[variable_mask]
+  
+      if self.args.mrf_inference == "lbp":
+          if not hasattr(graph_data, "lbp_edges"):
+              raise AttributeError(
+                  "MRF inference requested with mrf_inference='lbp', "
+                  "but graph_data has no lbp_edges. "
+                  "Enable the matching dataset/cache flag."
+              )
+          return self._run_lbp_marginals(variable_params, graph_data)
+  
+      if self.args.mrf_inference == "nmf":
+          if not hasattr(graph_data, "nmf_edges"):
+              raise AttributeError(
+                  "MRF inference requested with mrf_inference='nmf', "
+                  "but graph_data has no nmf_edges. "
+                  "Enable the matching dataset/cache flag."
+              )
+          return self._run_nmf_marginals(variable_params, graph_data)
+  
+      raise ValueError(f"Unknown mrf_inference={self.args.mrf_inference!r}")
 
 
   def forward(self, x, t, edge_index):
-    return self.model(x, t, edge_index=edge_index)
+    r = self.model(x, t, edge_index=edge_index)
+    print("in MISModel forward")
+    print("\t r.shape = ", r.shape)
+    print("\t model type = ", type(self.model))
+    return r
 
-  #def categorical_training_step(self, batch, batch_idx):
-  #  _, graph_data, point_indicator = batch
-  #  t = np.random.randint(1, self.diffusion.T + 1, point_indicator.shape[0]).astype(int)
-  #  node_labels = graph_data.x
-  #  edge_index = graph_data.edge_index
-
-  #  # Sample from diffusion
-  #  node_labels_onehot = F.one_hot(node_labels.long(), num_classes=2).float()
-  #  node_labels_onehot = node_labels_onehot.unsqueeze(1).unsqueeze(1)
-
-  #  t = torch.from_numpy(t).long()
-  #  t = t.repeat_interleave(point_indicator.reshape(-1).cpu(), dim=0).numpy()
-
-  #  xt = self.diffusion.sample(node_labels_onehot, t)
-  #  xt = xt * 2 - 1
-  #  xt = xt * (1.0 + 0.05 * torch.rand_like(xt))
-
-  #  t = torch.from_numpy(t).float()
-  #  t = t.reshape(-1)
-  #  xt = xt.reshape(-1)
-  #  edge_index = edge_index.to(node_labels.device).reshape(2, -1)
-
-  #  # Denoise
-  #  x0_pred = self.forward(
-  #      xt.float().to(node_labels.device),
-  #      t.float().to(node_labels.device),
-  #      edge_index,
-  #  )
-
-  #  loss_func = nn.CrossEntropyLoss()
-  #  loss = loss_func(x0_pred, node_labels)
-  #  self.log("train/loss", loss)
-  #  return loss
   def categorical_training_step(self, batch, batch_idx):
       _, graph_data, point_indicator = batch
   

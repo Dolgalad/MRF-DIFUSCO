@@ -415,7 +415,7 @@ class GNNEncoder(nn.Module):
     e = self.out(e).reshape(-1, edge_index.shape[1]).permute((1, 0))
     return e
 
-  def sparse_forward_node_feature_only(self, x, timesteps, edge_index):
+  def sparse_forward_node_feature_only_final_embedding(self, x, timesteps, edge_index):
     #x = self.node_embed(self.pos_embed(x))
     x_raw = x
     if x_raw.dim() == 1:
@@ -439,7 +439,13 @@ class GNNEncoder(nn.Module):
     edge_index = edge_index.long()
 
     x, e = self.sparse_encoding(x, e, edge_index, time_emb)
+    return x, e, x_shape
+
+  def sparse_forward_node_feature_only(self, x, timesteps, edge_index):
+    x, e, x_shape = self.sparse_forward_node_feature_only_final_embedding(x, timesteps, edge_index)
+
     x = x.reshape((1, x_shape[0], -1, x.shape[-1])).permute((0, 3, 1, 2))
+
     x = self.out(x).reshape(-1, x_shape[0]).permute((1, 0))
     return x
 
