@@ -1030,7 +1030,6 @@ class MISModel(COMetaModel):
               xt_variables,
           )
   
-          return xt_variables.reshape(-1).long()
-
+          return xt_variables.reshape(-1)
   def validation_step(self, batch, batch_idx):
     return self.test_step(batch, batch_idx, split='val')
