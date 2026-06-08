@@ -126,7 +126,58 @@ def arg_parser():
       help="Store the bpropy variable-constraint graph as a cache sidecar.",
   )
 
+  parser.add_argument(
+      "--mrf_inference",
+      type=str,
+      default="none",
+      choices=["none", "loopy_belief_propagation", "naive_mean_field"],
+      help=(
+          "MRF inference method to use after predicting canonical parameters. "
+          "'none' keeps the standard DIFUSCO predictor path."
+      ),
+  )
+  parser.add_argument(
+      "--mrf_bp_max_iter",
+      type=int,
+      default=10,
+      help="Maximum number of LBP/NMF inference iterations.",
+  )
+  parser.add_argument(
+      "--mrf_bp_tol",
+      type=float,
+      default=1e-6,
+      help="Convergence tolerance for LBP/NMF inference.",
+  )
+  parser.add_argument(
+      "--mrf_bp_damping",
+      type=float,
+      default=0.5,
+      help="Damping used by LBP/NMF inference.",
+  )
+  parser.add_argument(
+      "--mrf_factor_sizes",
+      type=str,
+      default="1,2",
+      help="Comma-separated factor arities supported by EFCanonicalParam, e.g. '1,2'.",
+  )
+  parser.add_argument(
+      "--mrf_normalize_theta",
+      action="store_true",
+      help="Normalize/log-normalize canonical parameters before inference.",
+  )
+
   args = parser.parse_args()
+
+  args.mrf_factor_sizes = [int(x) for x in args.mrf_factor_sizes.split(",") if x.strip()]
+  if args.mrf_inference != "none":
+    if args.input_representation != "bipartite":
+      raise ValueError("--mrf_inference currently requires --input_representation bipartite")
+    if args.mrf_inference == "loopy_belief_propagation":
+      args.bipartite_with_lbp = True
+    if args.mrf_inference == "naive_mean_field":
+      args.bipartite_with_nmf = True
+    args.bipartite_with_ss = True
+    
   return args
 
 
