@@ -44,6 +44,12 @@ class COMetaModel(pl.LightningModule):
         use_activation_checkpoint=self.args.use_activation_checkpoint,
         node_feature_only=node_feature_only,
         input_node_dim = 2 if self.args.input_representation == "bipartite" else 1,
+        mrf_inference = getattr(self.args, "mrf_inference", "none"),
+        mrf_bp_max_iter = getattr(self.args, "mrf_bp_max_iter", 10),
+        mrf_bp_tol = getattr(self.args, "mrf_bp_tol", 1e-6),
+        mrf_bp_damping = getattr(self.args, "mrf_bp_damping", 0.5),
+        mrf_normalize_theta = getattr(self.args, "mrf_normalize", False),
+        mrf_factor_sizes=getattr(self.args, "mrf_factor_sizes", (1,2)),
     )
     self.num_training_steps_cached = None
 

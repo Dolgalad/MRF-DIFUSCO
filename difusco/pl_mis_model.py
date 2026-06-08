@@ -101,12 +101,16 @@ class MISModel(COMetaModel):
       raise ValueError(f"Unknown mrf_inference={self.args.mrf_inference!r}")
 
 
-  def forward(self, x, t, edge_index):
-    r = self.model(x, t, edge_index=edge_index)
-    print("in MISModel forward")
-    print("\t r.shape = ", r.shape)
-    print("\t model type = ", type(self.model))
-    return r
+  def forward(self, x, t, edge_index, graph_data=None):
+    if getattr(self.model, "use_mrf_inference", False):
+      return self.model(
+          x,
+          t,
+          edge_index=edge_index,
+          graph_data=graph_data,
+      )
+
+    return self.model(x, t, edge_index=edge_index)
 
   def categorical_training_step(self, batch, batch_idx):
       _, graph_data, point_indicator = batch
@@ -184,6 +188,7 @@ class MISModel(COMetaModel):
               x_features.float(),
               t_full.float(),
               edge_index,
+              graph_data=graph_data,
           )
   
           x0_pred_variables = x0_pred_full[variable_mask].reshape(-1, 2)
@@ -224,6 +229,7 @@ class MISModel(COMetaModel):
               xt.float(),
               t.float(),
               edge_index,
+              graph_data=graph_data,
           )
   
           loss = F.cross_entropy(
@@ -506,6 +512,7 @@ class MISModel(COMetaModel):
           x_features.float(),
           t_full.float(),
           edge_index,
+          graph_data=graph_data,
       )
 
 
@@ -521,6 +528,7 @@ class MISModel(COMetaModel):
           xt.float(),
           t_tensor.float(),
           edge_index,
+          graph_data=graph_data,
       ).reshape(-1)
   
       loss = F.mse_loss(epsilon_pred, epsilon.float())
@@ -533,25 +541,27 @@ class MISModel(COMetaModel):
     elif self.diffusion_type == 'categorical':
       return self.categorical_training_step(batch, batch_idx)
 
-  def categorical_denoise_step(self, xt, t, device, edge_index=None, target_t=None):
+  def categorical_denoise_step(self, xt, t, device, edge_index=None, target_t=None, graph_data=None):
     with torch.no_grad():
       t = torch.from_numpy(t).view(1)
       x0_pred = self.forward(
           xt.float().to(device),
           t.float().to(device),
           edge_index.long().to(device) if edge_index is not None else None,
+          graph_data=graph_data,
       )
       x0_pred_prob = x0_pred.reshape((1, xt.shape[0], -1, 2)).softmax(dim=-1)
       xt = self.categorical_posterior(target_t, t, x0_pred_prob, xt)
       return xt
 
-  def gaussian_denoise_step(self, xt, t, device, edge_index=None, target_t=None):
+  def gaussian_denoise_step(self, xt, t, device, edge_index=None, target_t=None, graph_data=None):
     with torch.no_grad():
       t = torch.from_numpy(t).view(1)
       pred = self.forward(
           xt.float().to(device),
           t.float().to(device),
           edge_index.long().to(device) if edge_index is not None else None,
+          graph_data=graph_data,
       )
       pred = pred.squeeze(1)
       xt = self.gaussian_posterior(target_t, t, pred, xt)
@@ -764,6 +774,7 @@ class MISModel(COMetaModel):
               variable_mask=cur_variable_mask,
               edge_index=cur_model_edge_index,
               target_t=t2,
+              graph_data=graph_data,
           )
         else:
           xt = self.bipartite_categorical_denoise_step(
@@ -775,6 +786,7 @@ class MISModel(COMetaModel):
               constraint_mask=constraint_mask,
               edge_index=cur_model_edge_index,
               target_t=t2,
+              graph_data=graph_data,
           )
 
       if self.diffusion_type == "gaussian":
@@ -842,21 +854,6 @@ class MISModel(COMetaModel):
       # The model input timestep still needs to live on the model/device.
       t_model = t_cpu.float().to(device)
 
-      #xt_full = x_template.clone().float().reshape(-1).to(device)
-      #xt_full[variable_mask] = xt_variables.float().reshape(-1).to(device)
-
-      #t_full = torch.zeros(
-      #    xt_full.shape[0],
-      #    device=device,
-      #    dtype=t_model.dtype,
-      #)
-      #t_full[variable_mask] = t_model
-
-      #pred_full = self.forward(
-      #    xt_full.float(),
-      #    t_full.float(),
-      #    edge_index.long().to(device),
-      #)
       xt_full_assignment = x_template.clone().float().reshape(-1).to(device)
       xt_full_assignment[variable_mask] = xt_variables.float().reshape(-1).to(device)
 
@@ -890,6 +887,7 @@ class MISModel(COMetaModel):
           x_features.float(),
           t_full.float(),
           edge_index.long().to(device),
+          graph_data=graph_data,
       )
 
       pred_variables = pred_full[variable_mask].reshape(-1)
@@ -995,6 +993,7 @@ class MISModel(COMetaModel):
       constraint_mask,
       edge_index,
       target_t=None,
+      graph_data=None,
   ):
       with torch.no_grad():
           t_cpu = torch.from_numpy(t).view(1)
@@ -1022,6 +1021,7 @@ class MISModel(COMetaModel):
               x_features.float(),
               t_full.float(),
               edge_index.long().to(device),
+              graph_data=graph_data,
           )
   
           x0_pred_variables = x0_pred_full[variable_mask].reshape(-1, 2)

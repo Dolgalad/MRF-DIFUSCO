@@ -16,6 +16,11 @@ from torch_sparse import mean as sparse_mean
 from torch_sparse import max as sparse_max
 import torch.utils.checkpoint as activation_checkpoint
 
+from bpropy.models.efcanonicalparam import EFCanonicalParam
+from torchvision.ops import MLP
+from torch.nn import ReLU, ELU, Dropout, BatchNorm1d
+from torch_geometric.data import Data
+
 
 class GNNLayer(nn.Module):
   """Configurable GNN Layer
@@ -302,6 +307,12 @@ class GNNEncoder(nn.Module):
                use_activation_checkpoint=False, 
                node_feature_only=False, 
                input_node_dim=1,
+               mrf_inference="none",
+               mrf_bp_max_iter=10,
+               mrf_bp_tol=1e-6,
+               mrf_bp_damping=0.5,
+               mrf_normalize_theta=False,
+               mrf_factor_sizes=(1, 2),
                *args, **kwargs):
     super(GNNEncoder, self).__init__()
     self.sparse = sparse
@@ -312,6 +323,27 @@ class GNNEncoder(nn.Module):
     self.node_embed = nn.Linear(hidden_dim, hidden_dim)
     self.edge_embed = nn.Linear(hidden_dim, hidden_dim)
 
+    self.mrf_inference = mrf_inference
+    self.mrf_bp_max_iter = mrf_bp_max_iter
+    self.mrf_bp_tol = mrf_bp_tol
+    self.mrf_normalize_theta = mrf_normalize_theta
+    self.mrf_factor_sizes = mrf_factor_sizes
+
+    self.use_mrf_inference = mrf_inference not in (None, "none", "off")
+
+    if self.use_mrf_inference:
+        self.efc = EFCanonicalParam(
+            hidden_dim,
+            lambda in_channels, out_channels: MLP(
+                in_channels,
+                hidden_channels=[64, 64, out_channels],
+                activation_layer=ELU,
+                norm_layer=torch.nn.LayerNorm,
+            ),
+            factor_sizes=list(mrf_factor_sizes),
+        )
+    else:
+        self.efc = None
     if self.input_node_dim > 1:
         self.extra_node_embed = nn.Linear(self.input_node_dim - 1, hidden_dim)
     else:
@@ -448,6 +480,116 @@ class GNNEncoder(nn.Module):
 
     x = self.out(x).reshape(-1, x_shape[0]).permute((1, 0))
     return x
+  def sparse_forward_node_feature_only_mrf(
+      self,
+      x,
+      timesteps,
+      edge_index,
+      graph_data,
+      inference=None,
+  ):
+      inference = self.mrf_inference if inference is None else inference
+  
+      h, e, x_shape = self.sparse_forward_node_feature_only_final_embedding(
+          x,
+          timesteps,
+          edge_index,
+      )
+  
+      if graph_data is None:
+          raise ValueError("MRF inference requires graph_data.")
+  
+      variable_mask = graph_data.variable_mask.bool().to(h.device)
+      constraint_mask = graph_data.constraint_mask.bool().to(h.device)
+  
+      variable_ids = torch.where(variable_mask)[0]
+      constraint_ids = torch.where(constraint_mask)[0]
+  
+      # IMPORTANT: this matches the factor ordering used by your MRF code:
+      # all variable unary factors first, then all constraint factors.
+      factor_ids = torch.cat([variable_ids, constraint_ids], dim=0)
+      factor_embeddings = h.index_select(0, factor_ids)
+  
+      if hasattr(graph_data, "factor_sizes"):
+          factor_sizes = graph_data.factor_sizes.to(h.device).long().index_select(
+              0,
+              factor_ids,
+          )
+      else:
+          factor_sizes = torch.cat(
+              [
+                  torch.ones(variable_ids.numel(), dtype=torch.long, device=h.device),
+                  torch.full(
+                      (constraint_ids.numel(),),
+                      2,
+                      dtype=torch.long,
+                      device=h.device,
+                  ),
+              ],
+              dim=0,
+          )
+  
+      tmp_data = Data()
+      tmp_data.factor_sizes = factor_sizes
+  
+      if hasattr(graph_data, "lbp_edges"):
+          tmp_data.lbp_edges = graph_data.lbp_edges
+      if hasattr(graph_data, "nmf_edges"):
+          tmp_data.nmf_edges = graph_data.nmf_edges
+  
+      theta = self.efc(factor_embeddings, tmp_data)
+  
+      if self.mrf_normalize_theta:
+          block_sizes = 1 << factor_sizes
+          factor_index = torch.arange(
+              factor_sizes.numel(),
+              device=h.device,
+          ).repeat_interleave(block_sizes)
+  
+          log_z = torch_scatter.scatter_logsumexp(theta, factor_index)
+          theta = theta - log_z.repeat_interleave(block_sizes)
+  
+      if inference in (None, "none", "theta", "theta_only", "no_inference"):
+          return theta
+  
+      if inference == "loopy_belief_propagation":
+          if not hasattr(graph_data, "lbp_edges"):
+              raise AttributeError(
+                  "mrf_inference='loopy_belief_propagation' requires graph_data.lbp_edges."
+              )
+
+          print(graph_data.lbp_edges)
+  
+          v2f = theta.new_zeros(int(graph_data.lbp_edges.n_f2v_msg.sum().item()))
+  
+          beliefs = loopy_belief_propagation(
+              theta,
+              v2f,
+              graph_data.lbp_edges,
+              max_iter=self.mrf_bp_max_iter,
+              tol=self.mrf_bp_tol,
+              damping=self.mrf_bp_damping,
+          )
+  
+          return beliefs, theta, factor_sizes
+  
+      if inference == "naive_mean_field":
+          if not hasattr(graph_data, "nmf_edges"):
+              raise AttributeError(
+                  "mrf_inference='naive_mean_field' requires graph_data.nmf_edges."
+              )
+  
+          beliefs = naive_mean_field(
+              theta,
+              graph_data.nmf_edges,
+              max_iter=self.mrf_bp_max_iter,
+              tol=self.mrf_bp_tol,
+              damping=self.mrf_bp_damping,
+          )
+  
+          return beliefs, theta, factor_sizes
+  
+      raise ValueError(f"Unknown mrf_inference={inference!r}")
 
   def sparse_encoding(self, x, e, edge_index, time_emb):
     adj_matrix = SparseTensor(
@@ -485,9 +627,11 @@ class GNNEncoder(nn.Module):
         e = e_in + out_layer(e)
     return x, e
 
-  def forward(self, x, timesteps, graph=None, edge_index=None):
+  def forward(self, x, timesteps, graph=None, edge_index=None, graph_data=None):
     if self.node_feature_only:
       if self.sparse:
+        if self.use_mrf_inference:
+          return self.sparse_forward_node_feature_only_mrf(x, timesteps, edge_index, graph_data=graph_data)
         return self.sparse_forward_node_feature_only(x, timesteps, edge_index)
       else:
         raise NotImplementedError
