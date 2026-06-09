@@ -190,13 +190,18 @@ class MISModel(COMetaModel):
               edge_index,
               graph_data=graph_data,
           )
+
+          if self._use_mrf_inference():
+            x0_pred_variables = x0_pred_full[0].mu_v.reshape(-1, 2)
+            log_probs = torch.log(x0_pred_variables.clamp_min(1e-12))
+            loss = F.nll_loss(log_probs, node_labels)
+          else:
+            x0_pred_variables = x0_pred_full[variable_mask].reshape(-1, 2)
   
-          x0_pred_variables = x0_pred_full[variable_mask].reshape(-1, 2)
-  
-          loss = F.cross_entropy(
-              x0_pred_variables,
-              node_labels,
-          )
+            loss = F.cross_entropy(
+                x0_pred_variables,
+                node_labels,
+            )
   
       else:
           t = np.random.randint(
@@ -658,9 +663,6 @@ class MISModel(COMetaModel):
     for k, v in metrics.items():
       self.log(k, float(v), on_epoch=True, sync_dist=True)
 
-    print()
-    print("best_solved_cost = ", best_solved_cost)
-    print()
 
     self.log(
         f"{split}/solved_cost",
@@ -795,8 +797,6 @@ class MISModel(COMetaModel):
         predict_labels = xt.float().cpu().detach().numpy() + 1e-6
       stacked_predict_labels.append(predict_labels)
 
-    print(xt)
-
     predict_labels = np.concatenate(stacked_predict_labels, axis=0)
     all_sampling = self.args.sequential_sampling * self.args.parallel_sampling
     splitted_predict_labels = np.split(predict_labels, all_sampling)
@@ -806,7 +806,6 @@ class MISModel(COMetaModel):
           f"Expected prediction length {num_variable_nodes}, got {sample.shape[0]}"
       )
 
-    print(predict_labels)
     solved_solutions = [
         mis_decode_np(predict_labels, adj_mat)
         for predict_labels in splitted_predict_labels
@@ -822,9 +821,6 @@ class MISModel(COMetaModel):
     for k, v in metrics.items():
       self.log(k, float(v), on_epoch=True, sync_dist=True)
 
-    print()
-    print(best_solved_cost)
-    print()
 
     self.log(
         f"{split}/solved_cost",
@@ -1023,8 +1019,11 @@ class MISModel(COMetaModel):
               edge_index.long().to(device),
               graph_data=graph_data,
           )
-  
-          x0_pred_variables = x0_pred_full[variable_mask].reshape(-1, 2)
+          
+          if self._use_mrf_inference():
+            x0_pred_variables = x0_pred_full[0].mu_v.reshape(-1,2)
+          else:
+            x0_pred_variables = x0_pred_full[variable_mask].reshape(-1, 2)
   
           x0_pred_prob = x0_pred_variables.reshape(
               (1, xt_variables.shape[0], -1, 2)

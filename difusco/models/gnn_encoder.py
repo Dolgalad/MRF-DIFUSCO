@@ -21,6 +21,8 @@ from torchvision.ops import MLP
 from torch.nn import ReLU, ELU, Dropout, BatchNorm1d
 from torch_geometric.data import Data
 
+from bpropy.mrf.lbp import loopy_belief_propagation
+from bpropy.mrf.naive_mean_field import naive_mean_field
 
 class GNNLayer(nn.Module):
   """Configurable GNN Layer
@@ -326,6 +328,7 @@ class GNNEncoder(nn.Module):
     self.mrf_inference = mrf_inference
     self.mrf_bp_max_iter = mrf_bp_max_iter
     self.mrf_bp_tol = mrf_bp_tol
+    self.mrf_bp_damping = mrf_bp_damping
     self.mrf_normalize_theta = mrf_normalize_theta
     self.mrf_factor_sizes = mrf_factor_sizes
 
@@ -336,7 +339,7 @@ class GNNEncoder(nn.Module):
             hidden_dim,
             lambda in_channels, out_channels: MLP(
                 in_channels,
-                hidden_channels=[64, 64, out_channels],
+                hidden_channels=[hidden_dim, hidden_dim, out_channels],
                 activation_layer=ELU,
                 norm_layer=torch.nn.LayerNorm,
             ),
@@ -508,7 +511,7 @@ class GNNEncoder(nn.Module):
       # IMPORTANT: this matches the factor ordering used by your MRF code:
       # all variable unary factors first, then all constraint factors.
       factor_ids = torch.cat([variable_ids, constraint_ids], dim=0)
-      factor_embeddings = h.index_select(0, factor_ids)
+      factor_embeddings = h#.index_select(0, factor_ids)
   
       if hasattr(graph_data, "factor_sizes"):
           factor_sizes = graph_data.factor_sizes.to(h.device).long().index_select(
@@ -558,7 +561,6 @@ class GNNEncoder(nn.Module):
                   "mrf_inference='loopy_belief_propagation' requires graph_data.lbp_edges."
               )
 
-          print(graph_data.lbp_edges)
   
           v2f = theta.new_zeros(int(graph_data.lbp_edges.n_f2v_msg.sum().item()))
   

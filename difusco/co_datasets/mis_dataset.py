@@ -311,6 +311,14 @@ class MISDataset(torch.utils.data.Dataset):
     
             data.preprocess_cached = False
             data.preprocess_time_s = preprocess_time_s
+
+            # Important: data was saved without these attributes to avoid duplicating
+            # large sidecars, but the object returned by __getitem__ still needs them.
+            if self.bipartite_with_lbp and sidecars.get("lbp_edges") is not None:
+                data.lbp_edges = sidecars["lbp_edges"]
+
+            if self.bipartite_with_nmf and sidecars.get("nmf_edges") is not None:
+                data.nmf_edges = sidecars["nmf_edges"]
     
             return data  
 

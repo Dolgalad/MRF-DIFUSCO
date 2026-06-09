@@ -12,6 +12,8 @@ from models.gnn_encoder import GNNEncoder
 from utils.lr_schedulers import get_schedule_fn
 from utils.diffusion_schedulers import CategoricalDiffusion, GaussianDiffusion
 
+from co_datasets.mrf_collate import mis_mrf_collate
+
 
 class COMetaModel(pl.LightningModule):
   def __init__(self,
@@ -190,23 +192,96 @@ class COMetaModel(pl.LightningModule):
     edge_index = edge_index.reshape((2, -1))
     return edge_index
 
+  #def train_dataloader(self):
+  #  batch_size = self.args.batch_size
+  #  train_dataloader = GraphDataLoader(
+  #      self.train_dataset, batch_size=batch_size, shuffle=True,
+  #      num_workers=self.args.num_workers, pin_memory=True,
+  #      persistent_workers=True, drop_last=True)
+  #  return train_dataloader
   def train_dataloader(self):
     batch_size = self.args.batch_size
-    train_dataloader = GraphDataLoader(
-        self.train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=self.args.num_workers, pin_memory=True,
-        persistent_workers=True, drop_last=True)
-    return train_dataloader
 
+    use_mrf_collate = (
+        getattr(self.args, "task", None) == "mis"
+        and getattr(self.args, "input_representation", None) == "bipartite"
+        and (
+            getattr(self.args, "bipartite_with_lbp", False)
+            or getattr(self.args, "bipartite_with_nmf", False)
+        )
+    )
+
+    loader_cls = torch.utils.data.DataLoader if use_mrf_collate else GraphDataLoader
+
+    kwargs = dict(
+        dataset=self.train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=self.args.num_workers,
+        pin_memory=True,
+        persistent_workers=True,
+        drop_last=True,
+    )
+
+    if use_mrf_collate:
+        kwargs["collate_fn"] = mis_mrf_collate
+
+    return loader_cls(**kwargs)
+
+  #def test_dataloader(self):
+  #  batch_size = 1
+  #  print("Test dataset size:", len(self.test_dataset))
+  #  test_dataloader = GraphDataLoader(self.test_dataset, batch_size=batch_size, shuffle=False)
+  #  return test_dataloader
   def test_dataloader(self):
     batch_size = 1
     print("Test dataset size:", len(self.test_dataset))
-    test_dataloader = GraphDataLoader(self.test_dataset, batch_size=batch_size, shuffle=False)
-    return test_dataloader
 
+    use_mrf_collate = (
+        getattr(self.args, "task", None) == "mis"
+        and getattr(self.args, "input_representation", None) == "bipartite"
+        and (
+            getattr(self.args, "bipartite_with_lbp", False)
+            or getattr(self.args, "bipartite_with_nmf", False)
+        )
+    )
+
+    if use_mrf_collate:
+        return torch.utils.data.DataLoader(
+            self.test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=mis_mrf_collate,
+        )
+
+    return GraphDataLoader(self.test_dataset, batch_size=batch_size, shuffle=False)
+
+  #def val_dataloader(self):
+  #  batch_size = 1
+  #  val_dataset = torch.utils.data.Subset(self.validation_dataset, range(self.args.validation_examples))
+  #  print("Validation dataset size:", len(val_dataset))
+  #  val_dataloader = GraphDataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+  #  return val_dataloader
   def val_dataloader(self):
     batch_size = 1
-    val_dataset = torch.utils.data.Subset(self.validation_dataset, range(self.args.validation_examples))
-    print("Validation dataset size:", len(val_dataset))
-    val_dataloader = GraphDataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    return val_dataloader
+    print("Validation dataset size:", len(self.validation_dataset))
+
+    use_mrf_collate = (
+        getattr(self.args, "task", None) == "mis"
+        and getattr(self.args, "input_representation", None) == "bipartite"
+        and (
+            getattr(self.args, "bipartite_with_lbp", False)
+            or getattr(self.args, "bipartite_with_nmf", False)
+        )
+    )
+
+    if use_mrf_collate:
+        return torch.utils.data.DataLoader(
+            self.validation_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=mis_mrf_collate,
+        )
+
+    return GraphDataLoader(self.validation_dataset, batch_size=batch_size, shuffle=False)
+
