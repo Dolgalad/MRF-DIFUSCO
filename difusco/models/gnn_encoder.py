@@ -24,6 +24,8 @@ from torch_geometric.data import Data
 from bpropy.mrf.lbp import loopy_belief_propagation
 from bpropy.mrf.naive_mean_field import naive_mean_field
 
+import torch_scatter
+
 class GNNLayer(nn.Module):
   """Configurable GNN Layer
   Implements the Gated Graph ConvNet layer:

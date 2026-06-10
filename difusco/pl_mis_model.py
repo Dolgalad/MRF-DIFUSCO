@@ -1031,13 +1031,13 @@ class MISModel(COMetaModel):
           )
           
           if self._use_mrf_inference():
-            x0_pred_variables = x0_pred_full[0].mu_v.reshape(-1,2)
+            x0_pred_prob = x0_pred_full[0].mu_v.reshape(1, xt_variables.shape[0], -1, 2)
           else:
             x0_pred_variables = x0_pred_full[variable_mask].reshape(-1, 2)
   
-          x0_pred_prob = x0_pred_variables.reshape(
-              (1, xt_variables.shape[0], -1, 2)
-          ).softmax(dim=-1)
+            x0_pred_prob = x0_pred_variables.reshape(
+                (1, xt_variables.shape[0], -1, 2)
+            ).softmax(dim=-1)
   
           xt_variables = self.categorical_posterior(
               target_t,
