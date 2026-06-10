@@ -203,6 +203,7 @@ def main(args):
       entity=args.wandb_entity,
       save_dir=os.path.join(args.storage_path, f'models'),
       id=args.resume_id or wandb_id,
+      config=args,
   )
   rank_zero_info(f"Logging to {wandb_logger.save_dir}/{wandb_logger.name}/{wandb_logger.version}")
 

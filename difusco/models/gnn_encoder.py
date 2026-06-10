@@ -512,12 +512,13 @@ class GNNEncoder(nn.Module):
       # all variable unary factors first, then all constraint factors.
       factor_ids = torch.cat([variable_ids, constraint_ids], dim=0)
       factor_embeddings = h#.index_select(0, factor_ids)
-  
+
       if hasattr(graph_data, "factor_sizes"):
-          factor_sizes = graph_data.factor_sizes.to(h.device).long().index_select(
-              0,
-              factor_ids,
-          )
+          factor_sizes = graph_data.factor_sizes
+          #factor_sizes = graph_data.factor_sizes.to(h.device).long().index_select(
+          #    0,
+          #    factor_ids,
+          #)
       else:
           factor_sizes = torch.cat(
               [
@@ -541,7 +542,7 @@ class GNNEncoder(nn.Module):
           tmp_data.nmf_edges = graph_data.nmf_edges
   
       theta = self.efc(factor_embeddings, tmp_data)
-  
+
       if self.mrf_normalize_theta:
           block_sizes = 1 << factor_sizes
           factor_index = torch.arange(

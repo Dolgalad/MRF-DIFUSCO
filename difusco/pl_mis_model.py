@@ -663,6 +663,7 @@ class MISModel(COMetaModel):
     for k, v in metrics.items():
       self.log(k, float(v), on_epoch=True, sync_dist=True)
 
+    best_solved_gap = 100 * (gt_cost - best_solved_cost) / gt_cost
 
     self.log(
         f"{split}/solved_cost",
@@ -671,6 +672,15 @@ class MISModel(COMetaModel):
         on_epoch=True,
         sync_dist=True,
     )
+
+    self.log(
+        f"{split}/solved_gap",
+        float(best_solved_gap),
+        prog_bar=True,
+        on_epoch=True,
+        sync_dist=True,
+    )
+
 
     return metrics
 
