@@ -36,6 +36,16 @@ class MISModel(COMetaModel):
         bipartite_with_ss=self.args.bipartite_with_ss,
         bipartite_return_factor_graph=self.args.bipartite_return_factor_graph,
         bipartite_return_vc_graph=self.args.bipartite_return_vc_graph,
+        original_with_lbp=(
+            self.args.input_representation == "original"
+            and self.args.mrf_factor_representation == "original_edges"
+            and self.args.mrf_inference == "loopy_belief_propagation"
+        ),
+        original_with_nmf=(
+            self.args.input_representation == "original"
+            and self.args.mrf_factor_representation == "original_edges"
+            and self.args.mrf_inference == "naive_mean_field"
+        ),
     )
 
     self.test_dataset = MISDataset(
@@ -49,6 +59,17 @@ class MISModel(COMetaModel):
         bipartite_with_ss=self.args.bipartite_with_ss,
         bipartite_return_factor_graph=self.args.bipartite_return_factor_graph,
         bipartite_return_vc_graph=self.args.bipartite_return_vc_graph,
+        original_with_lbp=(
+            self.args.input_representation == "original"
+            and self.args.mrf_factor_representation == "original_edges"
+            and self.args.mrf_inference == "loopy_belief_propagation"
+        ),
+        original_with_nmf=(
+            self.args.input_representation == "original"
+            and self.args.mrf_factor_representation == "original_edges"
+            and self.args.mrf_inference == "naive_mean_field"
+        ),
+
     )
 
     self.validation_dataset = MISDataset(
@@ -62,6 +83,17 @@ class MISModel(COMetaModel):
         bipartite_with_ss=self.args.bipartite_with_ss,
         bipartite_return_factor_graph=self.args.bipartite_return_factor_graph,
         bipartite_return_vc_graph=self.args.bipartite_return_vc_graph,
+        original_with_lbp=(
+            self.args.input_representation == "original"
+            and self.args.mrf_factor_representation == "original_edges"
+            and self.args.mrf_inference == "loopy_belief_propagation"
+        ),
+        original_with_nmf=(
+            self.args.input_representation == "original"
+            and self.args.mrf_factor_representation == "original_edges"
+            and self.args.mrf_inference == "naive_mean_field"
+        ),
+
     )
   def _use_mrf_inference(self):
     return getattr(self.args, "mrf_inference", "none") not in (None, "none", "off", "")

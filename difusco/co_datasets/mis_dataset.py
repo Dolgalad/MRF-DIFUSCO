@@ -29,7 +29,12 @@ class BipartiteMISData(GraphData):
     def __inc__(self, key, value, *args, **kwargs):
         if key == "edge_index":
             return self.num_nodes
-
+        if key == "mrf_factor_node_index":
+            return self.num_nodes
+        if key == "mrf_factor_edge_pos":
+            return self.edge_index.size(1)
+        if key == "mrf_factor_edge_index":
+            return self.num_nodes
         if key == "graph_edge_index":
             if hasattr(self, "variable_mask"):
                 return int(self.variable_mask.sum().item())
@@ -87,6 +92,10 @@ class MISDataset(torch.utils.data.Dataset):
         self.bipartite_with_ss = bipartite_with_ss
         self.bipartite_return_factor_graph = bipartite_return_factor_graph
         self.bipartite_return_vc_graph = bipartite_return_vc_graph
+        self.original_with_lbp = original_with_lbp
+        self.original_with_nmf = original_with_nmf
+
+        self.original_mrf_cache_enabled = (self.input_representation == "original" and (self.original_with_lbp or self.original_with_nmf))
   
         if self.input_representation not in ("original", "bipartite"):
             raise ValueError(
@@ -94,7 +103,7 @@ class MISDataset(torch.utils.data.Dataset):
                     "Expected 'original' or 'bipartite'."
                     )
   
-        if self.input_representation == "bipartite":
+        if self.input_representation == "bipartite" or self.original_mrf_cache_enabled:
             self._init_bipartite_cache_dir()
         print(
                 f'Loaded "{data_file}" with {len(self.file_lines)} examples '
@@ -113,6 +122,24 @@ class MISDataset(torch.utils.data.Dataset):
           )
 
         os.makedirs(self.bipartite_cache_dir, exist_ok=True)
+    def _original_mrf_cache_key(self, idx):
+        graph_path = self.file_lines[idx]
+        st = os.stat(graph_path)
+
+        payload = {
+            "idx": int(idx),
+            "source_path": os.path.abspath(graph_path),
+            "source_mtime_ns": int(st.st_mtime_ns),
+            "source_size": int(st.st_size),
+            "cache_version": self.bipartite_cache_version,
+            "input_representation": "original",
+            "mrf_factor_representation": "original_edges",
+            "with_lbp": bool(self.original_with_lbp),
+            "with_nmf": bool(self.original_with_nmf),
+        }
+
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode()).hexdigest(), payload
     def _bipartite_cache_key(self, idx):
         graph_path = self.file_lines[idx]
         st = os.stat(graph_path)
@@ -132,6 +159,22 @@ class MISDataset(torch.utils.data.Dataset):
   
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode()).hexdigest(), payload
+    def _original_mrf_cache_paths(self, idx):
+        graph_path = self.file_lines[idx]
+        graph_name = os.path.basename(graph_path).replace(".gpickle", "")
+        cache_key, payload = self._original_mrf_cache_key(idx)
+
+        fname = f"{idx:06d}__{graph_name}__original_edges__{cache_key}"
+
+        paths = {
+            "data": os.path.join(self.bipartite_cache_dir, fname + ".pt"),
+            "meta": os.path.join(self.bipartite_cache_dir, fname + ".meta.json"),
+            "lbp_edges": os.path.join(self.bipartite_cache_dir, fname + ".lbp.pt"),
+            "nmf_edges": os.path.join(self.bipartite_cache_dir, fname + ".nmf.pt"),
+            "lock": os.path.join(self.bipartite_cache_dir, fname + ".lock"),
+        }
+
+        return paths, cache_key, payload
     def _bipartite_cache_paths(self, idx):
         graph_path = self.file_lines[idx]
         graph_name = os.path.basename(graph_path).replace(".gpickle", "")
@@ -150,6 +193,38 @@ class MISDataset(torch.utils.data.Dataset):
         }
 
         return paths, cache_key, payload
+    def _load_original_mrf_cache(self, paths, cache_key):
+        if not (os.path.exists(paths["data"]) and os.path.exists(paths["meta"])):
+            return None
+
+        try:
+            with open(paths["meta"], "r") as f:
+                meta = json.load(f)
+
+            if meta.get("cache_key") != cache_key:
+                return None
+
+            if self.original_with_lbp and not os.path.exists(paths["lbp_edges"]):
+                return None
+
+            if self.original_with_nmf and not os.path.exists(paths["nmf_edges"]):
+                return None
+
+            data = torch.load(paths["data"], weights_only=False)
+
+            if self.original_with_lbp:
+                data.lbp_edges = torch.load(paths["lbp_edges"], weights_only=False)
+
+            if self.original_with_nmf:
+                data.nmf_edges = torch.load(paths["nmf_edges"], weights_only=False)
+
+            data.preprocess_cached = True
+            data.preprocess_time_s = float(meta.get("preprocess_time_s", 0.0))
+            return data
+
+        except Exception as exc:
+            print(f"Failed to load original MRF cache {paths['data']}: {exc}")
+            return None
     def _load_bipartite_cache(self, paths, cache_key):
         if not (os.path.exists(paths["data"]) and os.path.exists(paths["meta"])):
             return None
@@ -197,6 +272,38 @@ class MISDataset(torch.utils.data.Dataset):
         except Exception as exc:
             print(f"Failed to load bipartite cache {paths['data']}: {exc}")
             return None
+    def _save_original_mrf_cache(
+        self,
+        paths,
+        data,
+        meta,
+        lbp_edges=None,
+        nmf_edges=None,
+    ):
+        tmp_paths = {}
+    
+        objects = {
+            "data": data,
+            "lbp_edges": lbp_edges,
+            "nmf_edges": nmf_edges,
+        }
+    
+        for key, obj in objects.items():
+            if obj is None:
+                continue
+    
+            tmp_path = paths[key] + ".tmp"
+            torch.save(obj, tmp_path)
+            tmp_paths[key] = tmp_path
+    
+        tmp_meta = paths["meta"] + ".tmp"
+        with open(tmp_meta, "w") as f:
+            json.dump(meta, f, indent=2)
+    
+        for key, tmp_path in tmp_paths.items():
+            os.replace(tmp_path, paths[key])
+    
+        os.replace(tmp_meta, paths["meta"])
     def _save_bipartite_cache(
         self,
         paths,
@@ -238,6 +345,8 @@ class MISDataset(torch.utils.data.Dataset):
   
     def get_example(self, idx):
         if self.input_representation == "original":
+            if self.original_mrf_cache_enabled:
+                return self.get_original_mrf_example(idx)
             return self.get_original_example(idx)
         if self.input_representation == "bipartite":
             return self.get_bipartite_example(idx)
@@ -271,7 +380,60 @@ class MISDataset(torch.utils.data.Dataset):
         edges = edges.T
   
         return num_nodes, node_labels, edges
+    def get_original_mrf_example(self, idx):
+        paths, cache_key, cache_payload = self._original_mrf_cache_paths(idx)
     
+        if not self.bipartite_cache_refresh:
+            cached = self._load_original_mrf_cache(paths, cache_key)
+            if cached is not None:
+                return cached
+    
+        with file_lock(paths["lock"]):
+            if not self.bipartite_cache_refresh:
+                cached = self._load_original_mrf_cache(paths, cache_key)
+                if cached is not None:
+                    return cached
+    
+            t0 = time.time()
+            data, sidecars = self._build_original_mrf_example(idx)
+            preprocess_time_s = time.time() - t0
+    
+            lbp_edges = sidecars.get("lbp_edges")
+            nmf_edges = sidecars.get("nmf_edges")
+    
+            # Do not duplicate large sidecars inside the main .pt data object.
+            if hasattr(data, "lbp_edges"):
+                del data.lbp_edges
+            if hasattr(data, "nmf_edges"):
+                del data.nmf_edges
+    
+            meta = {
+                "cache_key": cache_key,
+                "preprocess_time_s": preprocess_time_s,
+                "created": time.time(),
+                "has_lbp_edges": lbp_edges is not None,
+                "has_nmf_edges": nmf_edges is not None,
+                **cache_payload,
+            }
+    
+            self._save_original_mrf_cache(
+                paths,
+                data,
+                meta,
+                lbp_edges=lbp_edges,
+                nmf_edges=nmf_edges,
+            )
+    
+            data.preprocess_cached = False
+            data.preprocess_time_s = preprocess_time_s
+    
+            if self.original_with_lbp and lbp_edges is not None:
+                data.lbp_edges = lbp_edges
+    
+            if self.original_with_nmf and nmf_edges is not None:
+                data.nmf_edges = nmf_edges
+    
+            return data    
     def get_bipartite_example(self, idx):
         paths, cache_key, cache_payload = self._bipartite_cache_paths(idx)
     
@@ -434,7 +596,105 @@ class MISDataset(torch.utils.data.Dataset):
             return data, fg, vcg
       
         return data
-
+    def _build_original_mrf_example(self, idx):
+        with open(self.file_lines[idx], "rb") as f:
+            graph = pickle.load(f)
+    
+        node_labels = self._load_node_labels(idx, graph)
+        num_nodes = graph.number_of_nodes()
+    
+        edges = np.array(graph.edges, dtype=np.int64)
+    
+        if edges.size == 0:
+            directed_edges = np.empty((0, 2), dtype=np.int64)
+        else:
+            directed_edges = np.concatenate([edges, edges[:, ::-1]], axis=0)
+    
+        self_loop = np.arange(num_nodes).reshape(-1, 1).repeat(2, axis=1)
+        directed_edges = np.concatenate([directed_edges, self_loop], axis=0)
+    
+        edge_index = torch.from_numpy(directed_edges.T).long()
+    
+        x = torch.from_numpy(node_labels).long()
+    
+        data = BipartiteMISData(
+            x=x,
+            edge_index=edge_index,
+        )
+    
+        data.target = x.clone()
+        data.original_num_nodes = torch.tensor([num_nodes], dtype=torch.long)
+        data.problem_type_name = "MIS"
+        data.problem_type_code = torch.tensor([0], dtype=torch.long)
+    
+        # Unique undirected edges, no self-loops, sorted lexicographically.
+        undirected_edges = sorted(
+            (min(int(u), int(v)), max(int(u), int(v)))
+            for u, v in graph.edges()
+            if int(u) != int(v)
+        )
+        undirected_edges = list(dict.fromkeys(undirected_edges))
+    
+        edge_rows = edge_index.T.tolist()
+        directed_pos = {
+            (int(src), int(dst)): k
+            for k, (src, dst) in enumerate(edge_rows)
+        }
+    
+        mrf_factor_edge_pos = torch.tensor(
+            [
+                [directed_pos[(u, v)], directed_pos[(v, u)]]
+                for u, v in undirected_edges
+            ],
+            dtype=torch.long,
+        )
+    
+        num_edge_factors = len(undirected_edges)
+    
+        data.mrf_factor_is_edge = torch.cat([
+            torch.zeros(num_nodes, dtype=torch.bool),
+            torch.ones(num_edge_factors, dtype=torch.bool),
+        ])
+    
+        data.mrf_factor_node_index = torch.arange(
+            num_nodes,
+            dtype=torch.long,
+        )
+    
+        data.mrf_factor_edge_pos = mrf_factor_edge_pos
+    
+        # Optional but very useful for debug/assertions.
+        if num_edge_factors > 0:
+            data.mrf_factor_edge_index = torch.tensor(
+                undirected_edges,
+                dtype=torch.long,
+            ).T.contiguous()
+        else:
+            data.mrf_factor_edge_index = torch.empty((2, 0), dtype=torch.long)
+    
+        # Important: use the common field name factor_sizes.
+        data.factor_sizes = torch.cat([
+            torch.ones(num_nodes, dtype=torch.long),
+            torch.full((num_edge_factors,), 2, dtype=torch.long),
+        ])
+    
+        pb = MIS(graph)
+    
+        from bpropy.mrf.factor_graph import FactorGraph
+        from bpropy.mrf.lbp_edges import LBPEdges
+        from bpropy.mrf.nmf_edges import NMFEdges
+    
+        fg = FactorGraph(pb)
+    
+        lbp_edges = LBPEdges(fg) if self.original_with_lbp else None
+        nmf_edges = NMFEdges(fg) if self.original_with_nmf else None
+    
+        sidecars = {
+            "lbp_edges": lbp_edges,
+            "nmf_edges": nmf_edges,
+        }
+    
+        return data, sidecars
     def _build_bipartite_example(self, idx):
         with open(self.file_lines[idx], "rb") as f:
             graph = pickle.load(f)
@@ -516,6 +776,9 @@ class MISDataset(torch.utils.data.Dataset):
                 example,
                 point_indicator,
             )
+        if self.original_mrf_cache_enabled:
+            point_indicator = torch.tensor([int(example.original_num_nodes.item())], dtype=torch.long,)
+            return (torch.LongTensor(np.array([idx], dtype=np.int64)), example, point_indicator,)
   
         num_nodes, node_labels, edge_index = example
         graph_data = BipartiteMISData(

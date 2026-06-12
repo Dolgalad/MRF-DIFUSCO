@@ -516,7 +516,7 @@ class GNNEncoder(nn.Module):
     x,
     timesteps,
     edge_index,
-    graph_data=None,
+    graph_data,
     inference=None,
   ):
     inference = self.mrf_inference if inference is None else inference
@@ -526,47 +526,59 @@ class GNNEncoder(nn.Module):
         timesteps,
         edge_index,
     )
+
   
-    num_variables = h.shape[0]
+    if graph_data is None:
+      print("GRAPH DATA ", graph_data)
+      raise ValueError("original_edges MRF inference requires graph_data.")
   
-    # Build one factor per unique undirected original edge.
-    factor_edge_index = self._unique_undirected_edges(edge_index).to(h.device)
-    num_pairwise = factor_edge_index.shape[1]
+    required = [
+        "mrf_factor_is_edge",
+        "mrf_factor_node_index",
+        "mrf_factor_edge_pos",
+        "factor_sizes",
+    ]
+    for name in required:
+      if not hasattr(graph_data, name):
+        raise AttributeError(
+            f"original_edges MRF inference requires graph_data.{name}. "
+            "Rebuild the dataset cache with original MRF sidecars enabled."
+        )
   
-    # Need edge embeddings matching factor_edge_index order.
-    # The safest minimal version is to compute pairwise embeddings from node
-    # embeddings, not reuse e, because e corresponds to the directed edge_index
-    # order before deduplication.
-    u, v = factor_edge_index
-    pairwise_embeddings = 0.5 * (h[u] + h[v])
+    is_edge_factor = graph_data.mrf_factor_is_edge.to(h.device).bool()
+    node_index = graph_data.mrf_factor_node_index.to(h.device).long()
+    edge_pos = graph_data.mrf_factor_edge_pos.to(h.device).long()
+    factor_sizes = graph_data.factor_sizes.to(h.device).long()
   
-    factor_embeddings = torch.cat(
-        [
-            h,                  # unary factors, one per variable
-            pairwise_embeddings # pairwise edge factors
-        ],
-        dim=0,
+    if factor_sizes.numel() != is_edge_factor.numel():
+      raise RuntimeError(
+          "factor_sizes and mrf_factor_is_edge have inconsistent lengths: "
+          f"{factor_sizes.numel()} vs {is_edge_factor.numel()}."
+      )
+  
+    factor_embeddings = h.new_empty(
+        (is_edge_factor.numel(), h.size(-1))
     )
   
-    factor_sizes = torch.cat(
-        [
-            torch.ones(
-                num_variables,
-                dtype=torch.long,
-                device=h.device,
-            ),
-            torch.full(
-                (num_pairwise,),
-                2,
-                dtype=torch.long,
-                device=h.device,
-            ),
-        ],
-        dim=0,
+    # Unary factors: one per original graph node.
+    factor_embeddings[~is_edge_factor] = h.index_select(0, node_index)
+  
+    # Binary constraint factors: one per unique undirected graph edge.
+    edge_factor_embeddings = 0.5 * (
+        e.index_select(0, edge_pos[:, 0])
+        + e.index_select(0, edge_pos[:, 1])
     )
+  
+    factor_embeddings[is_edge_factor] = edge_factor_embeddings
   
     tmp_data = Data()
     tmp_data.factor_sizes = factor_sizes
+  
+    if hasattr(graph_data, "lbp_edges"):
+      tmp_data.lbp_edges = graph_data.lbp_edges
+  
+    if hasattr(graph_data, "nmf_edges"):
+      tmp_data.nmf_edges = graph_data.nmf_edges
   
     theta = self.efc(factor_embeddings, tmp_data)
   
@@ -576,24 +588,23 @@ class GNNEncoder(nn.Module):
           factor_sizes.numel(),
           device=h.device,
       ).repeat_interleave(block_sizes)
+  
       log_z = torch_scatter.scatter_logsumexp(theta, factor_index)
       theta = theta - log_z.repeat_interleave(block_sizes)
   
     if inference in (None, "none", "theta", "theta_only", "no_inference"):
       return theta
   
-    # We need original-edge MRF edges. See section below.
-    if graph_data is None:
-      raise ValueError("original_edges MRF inference requires graph_data.")
-  
     if inference == "loopy_belief_propagation":
       if not hasattr(graph_data, "lbp_edges"):
         raise AttributeError(
-            "original_edges MRF LBP requires graph_data.lbp_edges "
-            "built for factors ordered as [unaries, unique edges]."
+            "original_edges MRF LBP requires graph_data.lbp_edges."
         )
   
-      v2f = theta.new_zeros(int(graph_data.lbp_edges.n_f2v_msg.sum().item()))
+      v2f = theta.new_zeros(
+          int(graph_data.lbp_edges.n_f2v_msg.sum().item())
+      )
+  
       beliefs = loopy_belief_propagation(
           theta,
           v2f,
@@ -602,13 +613,13 @@ class GNNEncoder(nn.Module):
           tol=self.mrf_bp_tol,
           damping=self.mrf_bp_damping,
       )
+  
       return beliefs, theta, factor_sizes
   
     if inference == "naive_mean_field":
       if not hasattr(graph_data, "nmf_edges"):
         raise AttributeError(
-            "original_edges MRF NMF requires graph_data.nmf_edges "
-            "built for factors ordered as [unaries, unique edges]."
+            "original_edges MRF NMF requires graph_data.nmf_edges."
         )
   
       beliefs = naive_mean_field(
@@ -618,10 +629,10 @@ class GNNEncoder(nn.Module):
           tol=self.mrf_bp_tol,
           damping=self.mrf_bp_damping,
       )
+  
       return beliefs, theta, factor_sizes
   
     raise ValueError(f"Unknown mrf_inference={inference!r}")
-
   def sparse_forward_node_feature_only(self, x, timesteps, edge_index):
     x, e, x_shape = self.sparse_forward_node_feature_only_final_embedding(x, timesteps, edge_index)
 
@@ -787,7 +798,7 @@ class GNNEncoder(nn.Module):
 
           if self.mrf_factor_representation == "original_edges":
             return self.sparse_forward_node_feature_only_original_edge_mrf(
-                x, timesteps, edge_index, graph_data=graph_data
+                x, timesteps, edge_index, graph_data, inference=self.mrf_inference
             )
 
           raise ValueError(
