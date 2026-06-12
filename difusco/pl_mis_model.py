@@ -66,41 +66,6 @@ class MISModel(COMetaModel):
   def _use_mrf_inference(self):
     return getattr(self.args, "mrf_inference", "none") not in (None, "none", "off", "")
 
-
-  def forward_mrf_marginals(
-      self,
-      x,
-      t,
-      edge_index,
-      graph_data,
-      variable_mask,
-  ):
-      raw_params = self.forward(x, t, edge_index)
-  
-      # Only variable nodes correspond to MIS variables.
-      variable_params = raw_params[variable_mask]
-  
-      if self.args.mrf_inference == "lbp":
-          if not hasattr(graph_data, "lbp_edges"):
-              raise AttributeError(
-                  "MRF inference requested with mrf_inference='lbp', "
-                  "but graph_data has no lbp_edges. "
-                  "Enable the matching dataset/cache flag."
-              )
-          return self._run_lbp_marginals(variable_params, graph_data)
-  
-      if self.args.mrf_inference == "nmf":
-          if not hasattr(graph_data, "nmf_edges"):
-              raise AttributeError(
-                  "MRF inference requested with mrf_inference='nmf', "
-                  "but graph_data has no nmf_edges. "
-                  "Enable the matching dataset/cache flag."
-              )
-          return self._run_nmf_marginals(variable_params, graph_data)
-  
-      raise ValueError(f"Unknown mrf_inference={self.args.mrf_inference!r}")
-
-
   def forward(self, x, t, edge_index, graph_data=None):
     if getattr(self.model, "use_mrf_inference", False):
       return self.model(
@@ -840,6 +805,16 @@ class MISModel(COMetaModel):
         sync_dist=True,
     )
 
+    best_solved_gap = 100 * (gt_cost - best_solved_cost) / gt_cost
+    self.log(
+        f"{split}/solved_gap",
+        float(best_solved_gap),
+        prog_bar=True,
+        on_epoch=True,
+        sync_dist=True,
+    )
+
+
     return metrics
 
   def bipartite_gaussian_denoise_step(
@@ -906,88 +881,7 @@ class MISModel(COMetaModel):
       )
 
       return xt_variables
-  #def test_step(self, batch, batch_idx, draw=False, split='test'):
-  #  device = batch[-1].device
 
-  #  real_batch_idx, graph_data, point_indicator = batch
-  #  node_labels = graph_data.x
-  #  edge_index = graph_data.edge_index
-
-  #  stacked_predict_labels = []
-  #  
-  #  if self._is_bipartite_graph_data(graph_data):
-  #    variable_mask = graph_data.variable_mask.bool().to(device)
-  #    node_labels = graph_data.x[variable_mask].reshape(-1)
-  #    model_edge_index = graph_data.edge_index.to(device).reshape(2,-1)
-  #    graph_edge_index = graph_data.graph_edge_index.cpu().long().reshape(2,-1)
-  #    edge_index_np = graph_edge_index.numpy()
-  #    adj_mat = scipy.sparse.coo_matrix(
-  #            (
-  #                np.ones_like(edge_index_np[0]),
-  #                (edge_index_np[0], edge_index_np[1]),
-  #            ),
-  #            shape=(node_labels.shape[0], node_labels.shape[0]),
-  #    )
-  #  edge_index = edge_index.to(node_labels.device).reshape(2, -1)
-  #  edge_index_np = edge_index.cpu().numpy()
-  #  adj_mat = scipy.sparse.coo_matrix(
-  #      (np.ones_like(edge_index_np[0]), (edge_index_np[0], edge_index_np[1])),
-  #  )
-
-  #  for _ in range(self.args.sequential_sampling):
-  #    xt = torch.randn_like(node_labels.float())
-  #    if self.args.parallel_sampling > 1:
-  #      xt = xt.repeat(self.args.parallel_sampling, 1, 1)
-  #      xt = torch.randn_like(xt)
-
-  #    if self.diffusion_type == 'gaussian':
-  #      xt.requires_grad = True
-  #    else:
-  #      xt = (xt > 0).long()
-  #    xt = xt.reshape(-1)
-
-  #    if self.args.parallel_sampling > 1:
-  #      edge_index = self.duplicate_edge_index(edge_index, node_labels.shape[0], device)
-
-  #    batch_size = 1
-  #    steps = self.args.inference_diffusion_steps
-  #    time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
-  #                                      T=self.diffusion.T, inference_T=steps)
-
-  #    for i in range(steps):
-  #      t1, t2 = time_schedule(i)
-  #      t1 = np.array([t1 for _ in range(batch_size)]).astype(int)
-  #      t2 = np.array([t2 for _ in range(batch_size)]).astype(int)
-
-  #      if self.diffusion_type == 'gaussian':
-  #        xt = self.gaussian_denoise_step(
-  #            xt, t1, device, edge_index, target_t=t2)
-  #      else:
-  #        xt = self.categorical_denoise_step(
-  #            xt, t1, device, edge_index, target_t=t2)
-
-  #    if self.diffusion_type == 'gaussian':
-  #      predict_labels = xt.float().cpu().detach().numpy() * 0.5 + 0.5
-  #    else:
-  #      predict_labels = xt.float().cpu().detach().numpy() + 1e-6
-  #    stacked_predict_labels.append(predict_labels)
-
-  #  predict_labels = np.concatenate(stacked_predict_labels, axis=0)
-  #  all_sampling = self.args.sequential_sampling * self.args.parallel_sampling
-
-  #  splitted_predict_labels = np.split(predict_labels, all_sampling)
-  #  solved_solutions = [mis_decode_np(predict_labels, adj_mat) for predict_labels in splitted_predict_labels]
-  #  solved_costs = [solved_solution.sum() for solved_solution in solved_solutions]
-  #  best_solved_cost = np.max(solved_costs)
-
-  #  gt_cost = node_labels.cpu().numpy().sum()
-  #  metrics = {
-  #      f"{split}/gt_cost": gt_cost,
-  #  }
-  #  for k, v in metrics.items():
-  #    self.log(k, v, on_epoch=True, sync_dist=True)
-  #  self.log(f"{split}/solved_cost", best_solved_cost, prog_bar=True, on_epoch=True, sync_dist=True)
-  #  return metrics
 
   def bipartite_categorical_denoise_step(
       self,
