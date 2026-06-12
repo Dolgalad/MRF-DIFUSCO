@@ -317,6 +317,7 @@ class GNNEncoder(nn.Module):
                mrf_bp_damping=0.5,
                mrf_normalize_theta=False,
                mrf_factor_sizes=(1, 2),
+               mrf_factor_representation="bipartite_nodes",
                *args, **kwargs):
     super(GNNEncoder, self).__init__()
     self.sparse = sparse
@@ -333,6 +334,7 @@ class GNNEncoder(nn.Module):
     self.mrf_bp_damping = mrf_bp_damping
     self.mrf_normalize_theta = mrf_normalize_theta
     self.mrf_factor_sizes = mrf_factor_sizes
+    self.mrf_factor_representation = mrf_factor_representation
 
     self.use_mrf_inference = mrf_inference not in (None, "none", "off")
 
@@ -477,6 +479,148 @@ class GNNEncoder(nn.Module):
 
     x, e = self.sparse_encoding(x, e, edge_index, time_emb)
     return x, e, x_shape
+
+  def _unique_undirected_edges(self, edge_index):
+    """Return one oriented copy of each undirected edge, sorted lexicographically.
+
+    For MIS, each original graph edge {i, j} corresponds to one pairwise
+    constraint factor. DIFUSCO edge_index is usually directed/doubled, so we
+    must deduplicate it before creating factors.
+    """
+    edge_index = edge_index.long()
+    src, dst = edge_index[0], edge_index[1]
+
+    # Drop self-loops if any.
+    keep = src != dst
+    src = src[keep]
+    dst = dst[keep]
+
+    u = torch.minimum(src, dst)
+    v = torch.maximum(src, dst)
+
+    # Sort lexicographically by (u, v).
+    num_nodes = int(torch.max(torch.stack([u, v])).item()) + 1
+    key = u * num_nodes + v
+    perm = torch.argsort(key)
+    u = u[perm]
+    v = v[perm]
+    key = key[perm]
+
+    unique = torch.ones_like(key, dtype=torch.bool)
+    unique[1:] = key[1:] != key[:-1]
+
+    return torch.stack([u[unique], v[unique]], dim=0)
+
+  def sparse_forward_node_feature_only_original_edge_mrf(
+    self,
+    x,
+    timesteps,
+    edge_index,
+    graph_data=None,
+    inference=None,
+  ):
+    inference = self.mrf_inference if inference is None else inference
+  
+    h, e, x_shape = self.sparse_forward_node_feature_only_final_embedding(
+        x,
+        timesteps,
+        edge_index,
+    )
+  
+    num_variables = h.shape[0]
+  
+    # Build one factor per unique undirected original edge.
+    factor_edge_index = self._unique_undirected_edges(edge_index).to(h.device)
+    num_pairwise = factor_edge_index.shape[1]
+  
+    # Need edge embeddings matching factor_edge_index order.
+    # The safest minimal version is to compute pairwise embeddings from node
+    # embeddings, not reuse e, because e corresponds to the directed edge_index
+    # order before deduplication.
+    u, v = factor_edge_index
+    pairwise_embeddings = 0.5 * (h[u] + h[v])
+  
+    factor_embeddings = torch.cat(
+        [
+            h,                  # unary factors, one per variable
+            pairwise_embeddings # pairwise edge factors
+        ],
+        dim=0,
+    )
+  
+    factor_sizes = torch.cat(
+        [
+            torch.ones(
+                num_variables,
+                dtype=torch.long,
+                device=h.device,
+            ),
+            torch.full(
+                (num_pairwise,),
+                2,
+                dtype=torch.long,
+                device=h.device,
+            ),
+        ],
+        dim=0,
+    )
+  
+    tmp_data = Data()
+    tmp_data.factor_sizes = factor_sizes
+  
+    theta = self.efc(factor_embeddings, tmp_data)
+  
+    if self.mrf_normalize_theta:
+      block_sizes = 1 << factor_sizes
+      factor_index = torch.arange(
+          factor_sizes.numel(),
+          device=h.device,
+      ).repeat_interleave(block_sizes)
+      log_z = torch_scatter.scatter_logsumexp(theta, factor_index)
+      theta = theta - log_z.repeat_interleave(block_sizes)
+  
+    if inference in (None, "none", "theta", "theta_only", "no_inference"):
+      return theta
+  
+    # We need original-edge MRF edges. See section below.
+    if graph_data is None:
+      raise ValueError("original_edges MRF inference requires graph_data.")
+  
+    if inference == "loopy_belief_propagation":
+      if not hasattr(graph_data, "lbp_edges"):
+        raise AttributeError(
+            "original_edges MRF LBP requires graph_data.lbp_edges "
+            "built for factors ordered as [unaries, unique edges]."
+        )
+  
+      v2f = theta.new_zeros(int(graph_data.lbp_edges.n_f2v_msg.sum().item()))
+      beliefs = loopy_belief_propagation(
+          theta,
+          v2f,
+          graph_data.lbp_edges,
+          max_iter=self.mrf_bp_max_iter,
+          tol=self.mrf_bp_tol,
+          damping=self.mrf_bp_damping,
+      )
+      return beliefs, theta, factor_sizes
+  
+    if inference == "naive_mean_field":
+      if not hasattr(graph_data, "nmf_edges"):
+        raise AttributeError(
+            "original_edges MRF NMF requires graph_data.nmf_edges "
+            "built for factors ordered as [unaries, unique edges]."
+        )
+  
+      beliefs = naive_mean_field(
+          theta,
+          graph_data.nmf_edges,
+          max_iter=self.mrf_bp_max_iter,
+          tol=self.mrf_bp_tol,
+          damping=self.mrf_bp_damping,
+      )
+      return beliefs, theta, factor_sizes
+  
+    raise ValueError(f"Unknown mrf_inference={inference!r}")
 
   def sparse_forward_node_feature_only(self, x, timesteps, edge_index):
     x, e, x_shape = self.sparse_forward_node_feature_only_final_embedding(x, timesteps, edge_index)
@@ -636,7 +780,19 @@ class GNNEncoder(nn.Module):
     if self.node_feature_only:
       if self.sparse:
         if self.use_mrf_inference:
-          return self.sparse_forward_node_feature_only_mrf(x, timesteps, edge_index, graph_data=graph_data)
+          if self.mrf_factor_representation == "bipartite_nodes":
+            return self.sparse_forward_node_feature_only_mrf(
+                x, timesteps, edge_index, graph_data=graph_data
+            )
+
+          if self.mrf_factor_representation == "original_edges":
+            return self.sparse_forward_node_feature_only_original_edge_mrf(
+                x, timesteps, edge_index, graph_data=graph_data
+            )
+
+          raise ValueError(
+              f"Unknown mrf_factor_representation={self.mrf_factor_representation!r}"
+          )
         return self.sparse_forward_node_feature_only(x, timesteps, edge_index)
       else:
         raise NotImplementedError

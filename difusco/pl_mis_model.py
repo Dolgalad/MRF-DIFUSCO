@@ -201,11 +201,16 @@ class MISModel(COMetaModel):
               edge_index,
               graph_data=graph_data,
           )
-  
-          loss = F.cross_entropy(
-              x0_pred.reshape(-1, 2),
-              node_labels,
-          )
+
+          if self._use_mrf_inference():
+            beliefs = x0_pred[0]
+            # Adjust this depending on the exact bpropy return type.
+            # In your current bipartite code you use .mu_v.
+            probs = beliefs.mu_v.reshape(-1, 2)
+            log_probs = torch.log(probs.clamp_min(1e-12))
+            loss = F.nll_loss(log_probs, node_labels)
+          else:
+            loss = F.cross_entropy(x0_pred.reshape(-1, 2), node_labels)
   
       self.log("train/loss", loss)
       return loss
@@ -520,7 +525,10 @@ class MISModel(COMetaModel):
           edge_index.long().to(device) if edge_index is not None else None,
           graph_data=graph_data,
       )
-      x0_pred_prob = x0_pred.reshape((1, xt.shape[0], -1, 2)).softmax(dim=-1)
+      if self._use_mrf_inference():
+        x0_pred_prob = x0_pred[0].mu_v.reshape(1, xt.shape[0], -1, 2)
+      else:
+        x0_pred_prob = x0_pred.reshape((1, xt.shape[0], -1, 2)).softmax(dim=-1)
       xt = self.categorical_posterior(target_t, t, x0_pred_prob, xt)
       return xt
 

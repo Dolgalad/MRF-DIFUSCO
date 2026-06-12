@@ -166,17 +166,46 @@ def arg_parser():
       help="Normalize/log-normalize canonical parameters before inference.",
   )
 
+  parser.add_argument(
+      "--mrf_factor_representation",
+      type=str,
+      default="bipartite_nodes",
+      choices=["bipartite_nodes", "original_edges"],
+      help=(
+          "How to map GNN embeddings to MRF factors. "
+          "'bipartite_nodes' uses variable/constraint nodes as factors. "
+          "'original_edges' uses original graph nodes as unary factors and "
+          "original graph edges as pairwise factors."
+      ),
+  )
+
   args = parser.parse_args()
 
   args.mrf_factor_sizes = [int(x) for x in args.mrf_factor_sizes.split(",") if x.strip()]
   if args.mrf_inference != "none":
-    if args.input_representation != "bipartite":
-      raise ValueError("--mrf_inference currently requires --input_representation bipartite")
-    if args.mrf_inference == "loopy_belief_propagation":
-      args.bipartite_with_lbp = True
-    if args.mrf_inference == "naive_mean_field":
-      args.bipartite_with_nmf = True
-    args.bipartite_with_ss = True
+    if args.mrf_factor_representation == "bipartite_nodes":
+     if args.input_representation != "bipartite":
+       raise ValueError(
+           "--mrf_factor_representation bipartite_nodes requires "
+           "--input_representation bipartite"
+       )
+     if args.mrf_inference == "loopy_belief_propagation":
+       args.bipartite_with_lbp = True
+     if args.mrf_inference == "naive_mean_field":
+       args.bipartite_with_nmf = True
+     args.bipartite_with_ss = True
+
+    elif args.mrf_factor_representation == "original_edges":
+      if args.input_representation != "original":
+        raise ValueError(
+            "--mrf_factor_representation original_edges requires "
+            "--input_representation original"
+        )
+      if args.mrf_inference == "loopy_belief_propagation":
+        args.original_with_lbp = True
+      if args.mrf_inference == "naive_mean_field":
+        args.original_with_nmf = True
+      args.original_with_ss = True
     
   return args
 

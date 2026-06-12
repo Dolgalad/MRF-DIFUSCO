@@ -71,6 +71,8 @@ class MISDataset(torch.utils.data.Dataset):
                  bipartite_with_ss=False,
                  bipartite_return_factor_graph=False,
                  bipartite_return_vc_graph=False,
+                 original_with_lbp=False,
+                 original_with_nmf=False,
       ):
         self.data_file = data_file
         self.file_lines = glob.glob(data_file)
