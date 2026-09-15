@@ -120,8 +120,12 @@ def main(args):
   model = model_class(param_args=args)
 
   wandb_id = os.getenv("WANDB_RUN_ID") or wandb.util.generate_id()
+
+  logger_name = args.wandb_logger_name
+  if logger_name is None:
+    logger_name = f"{args.task}-{args.diffusion_type}-{args.prediction_type}"
   wandb_logger = WandbLogger(
-      name=args.wandb_logger_name,
+      name=logger_name,
       project=project_name,
       entity=args.wandb_entity,
       save_dir=os.path.join(args.storage_path, f'models'),
@@ -133,7 +137,7 @@ def main(args):
       monitor='val/solved_cost', mode=saving_mode,
       save_top_k=3, save_last=True,
       dirpath=os.path.join(wandb_logger.save_dir,
-                           args.wandb_logger_name,
+                           logger_name,
                            wandb_logger._id,
                            'checkpoints'),
   )
