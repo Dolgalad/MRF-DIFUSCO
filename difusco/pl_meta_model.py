@@ -187,9 +187,14 @@ class COMetaModel(pl.LightningModule):
   def train_dataloader(self):
     batch_size = self.args.batch_size
     train_dataloader = GraphDataLoader(
-        self.train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=self.args.num_workers, pin_memory=True,
-        persistent_workers=True, drop_last=True)
+        self.train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True,
+        num_workers=self.args.num_workers, 
+        pin_memory=True,
+        persistent_workers=self.args.num_workers > 0, 
+        drop_last=True
+    )
     return train_dataloader
 
   def test_dataloader(self):
