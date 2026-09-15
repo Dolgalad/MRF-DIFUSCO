@@ -11,6 +11,8 @@ from pytorch_lightning.callbacks.progress import TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies.ddp import DDPStrategy
 from pytorch_lightning.utilities import rank_zero_info
+from pytorch_lightning import seed_everything
+
 
 from pl_tsp_model import TSPModel
 from pl_mis_model import MISModel
@@ -18,6 +20,7 @@ from pl_mis_model import MISModel
 
 def arg_parser():
   parser = ArgumentParser(description='Train a Pytorch-Lightning diffusion model on a TSP dataset.')
+  parser.add_argument('--seed', type=int, default=1234)
   parser.add_argument('--task', type=str, required=True)
   parser.add_argument('--storage_path', type=str, required=True)
   parser.add_argument('--training_split', type=str, default='data/tsp/tsp50_train_concorde.txt')
@@ -116,6 +119,8 @@ def main(args):
     saving_mode = 'max'
   else:
     raise NotImplementedError
+  
+  seed_everything(args.seed, workers=True)
 
   model = model_class(param_args=args)
 
