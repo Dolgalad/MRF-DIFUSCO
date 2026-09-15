@@ -5,7 +5,7 @@ import pathlib
 import json
 import numpy as np
 import networkx as nx
-import dgl
+#import dgl
 import time
 import re
 
