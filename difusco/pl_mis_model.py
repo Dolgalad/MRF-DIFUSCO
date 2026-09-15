@@ -411,8 +411,8 @@ class MISModel(COMetaModel):
         f"{split}/gt_cost": gt_cost,
     }
     for k, v in metrics.items():
-      self.log(k, v, on_epoch=True, sync_dist=True)
-    self.log(f"{split}/solved_cost", best_solved_cost, prog_bar=True, on_epoch=True, sync_dist=True)
+      self.log(k, float(v), on_epoch=True, sync_dist=True)
+    self.log(f"{split}/solved_cost", float(best_solved_cost), prog_bar=True, on_epoch=True, sync_dist=True)
     return metrics
 
   def validation_step(self, batch, batch_idx):
