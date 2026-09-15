@@ -71,6 +71,20 @@ def arg_parser():
       choices=['unary', 'static_pairwise'],
   )
 
+  parser.add_argument(
+      '--validation_split_label_dir',
+      type=str,
+      default=None,
+      help="Directory containing labels for validation split (used for MIS).",
+  )
+  
+  parser.add_argument(
+      '--test_split_label_dir',
+      type=str,
+      default=None,
+      help="Directory containing labels for test split (used for MIS).",
+  )
+
 
   args = parser.parse_args()
 

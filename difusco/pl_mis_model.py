@@ -20,22 +20,52 @@ class MISModel(COMetaModel):
                param_args=None):
     super(MISModel, self).__init__(param_args=param_args, node_feature_only=True)
 
-    data_label_dir = None
+    train_label_dir = None
+    val_label_dir = None
+    test_label_dir = None
+    
     if self.args.training_split_label_dir is not None:
-      data_label_dir = os.path.join(self.args.storage_path, self.args.training_split_label_dir)
-
+      train_label_dir = os.path.join(
+          self.args.storage_path,
+          self.args.training_split_label_dir,
+      )
+    
+    if self.args.validation_split_label_dir is not None:
+      val_label_dir = os.path.join(
+          self.args.storage_path,
+          self.args.validation_split_label_dir,
+      )
+    
+    if self.args.test_split_label_dir is not None:
+      test_label_dir = os.path.join(
+          self.args.storage_path,
+          self.args.test_split_label_dir,
+      )
+    
     self.train_dataset = MISDataset(
-        data_file=os.path.join(self.args.storage_path, self.args.training_split),
-        data_label_dir=data_label_dir,
+        data_file=os.path.join(
+            self.args.storage_path,
+            self.args.training_split,
+        ),
+        data_label_dir=train_label_dir,
     )
-
-    self.test_dataset = MISDataset(
-        data_file=os.path.join(self.args.storage_path, self.args.test_split),
-    )
-
+    
     self.validation_dataset = MISDataset(
-        data_file=os.path.join(self.args.storage_path, self.args.validation_split),
+        data_file=os.path.join(
+            self.args.storage_path,
+            self.args.validation_split,
+        ),
+        data_label_dir=val_label_dir,
     )
+    
+    self.test_dataset = MISDataset(
+        data_file=os.path.join(
+            self.args.storage_path,
+            self.args.test_split,
+        ),
+        data_label_dir=test_label_dir,
+    )
+
 
   def forward(self, x, t, edge_index):
     return self.model(x, t, edge_index=edge_index)
