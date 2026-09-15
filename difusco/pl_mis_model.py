@@ -48,10 +48,21 @@ class MISModel(COMetaModel):
       edge_index,
       pair_mask,
   ):
+
+    assert pair_mask.dtype == torch.bool
+    assert pair_mask.shape[0] == edge_pred.shape[0]
+    assert edge_pred.shape[1] == 3
+    assert node_pred.shape[0] == node_labels.shape[0]
+    assert node_pred.shape[1] == 2
+
     pair_edges = edge_index[:, pair_mask]
   
     pair_u = pair_edges[0]
     pair_v = pair_edges[1]
+
+    if pair_u.numel() > 0:
+      matched = torch.cat([pair_u, pair_v])
+      assert torch.unique(matched).numel() == matched.numel()
   
     # State encoding:
     # 00 -> 0
@@ -291,14 +302,14 @@ class MISModel(COMetaModel):
       return xt
 
   def test_step(self, batch, batch_idx, draw=False, split='test'):
-    pair_mask = None
-
-    if self.args.prediction_type == "static_pairwise":
-      pair_mask = graph_data.pair_mask.bool().to(device)
+    real_batch_idx, graph_data, point_indicator = batch
 
     device = batch[-1].device
 
-    real_batch_idx, graph_data, point_indicator = batch
+    pair_mask = None
+    if self.args.prediction_type == "static_pairwise":
+      pair_mask = graph_data.pair_mask.bool().to(device)
+
     node_labels = graph_data.x
     edge_index = graph_data.edge_index
 

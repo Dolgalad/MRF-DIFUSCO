@@ -75,10 +75,18 @@ def arg_parser():
   args = parser.parse_args()
 
   # Temporary: disable Gaussian + static pairwise
-  if args.prediction_type == 'static_pairwise' and args.diffusion_type != 'categorical':
+  if args.prediction_type == 'static_pairwise':
+    if args.task != 'mis':
       raise ValueError(
-          "static_pairwise prediction is currently implemented only for categorical diffusion"
+          "static_pairwise prediction is currently implemented only for MIS"
       )
+  
+    if args.diffusion_type != 'categorical':
+      raise ValueError(
+          "static_pairwise prediction is currently implemented only "
+          "for categorical diffusion"
+      )
+
   return args
 
 

@@ -92,6 +92,7 @@ class MISDataset(torch.utils.data.Dataset):
     if pair_edges.shape[0] > 0:
         flat_nodes = pair_edges.reshape(-1)
         assert len(np.unique(flat_nodes)) == len(flat_nodes)
+        assert np.all(pair_edges[:,0] != pair_edges[:,1])
 
     edges = edges.T
 
