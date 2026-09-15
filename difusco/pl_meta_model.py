@@ -43,6 +43,7 @@ class COMetaModel(pl.LightningModule):
         sparse=self.sparse,
         use_activation_checkpoint=self.args.use_activation_checkpoint,
         node_feature_only=node_feature_only,
+        prediction_type=getattr(self.args, "prediction_type", "unary"),
     )
     self.num_training_steps_cached = None
 

@@ -291,14 +291,26 @@ class GNNEncoder(nn.Module):
   """Configurable GNN Encoder
   """
 
-  def __init__(self, n_layers, hidden_dim, out_channels=1, aggregation="sum", norm="layer",
-               learn_norm=True, track_norm=False, gated=True,
-               sparse=False, use_activation_checkpoint=False, node_feature_only=False,
-               *args, **kwargs):
+  def __init__(
+          self, 
+          n_layers, 
+          hidden_dim, 
+          out_channels=1, 
+          aggregation="sum", 
+          norm="layer",
+          learn_norm=True, 
+          track_norm=False, 
+          gated=True,
+          sparse=False, 
+          use_activation_checkpoint=False, 
+          node_feature_only=False,
+          prediction_type="unary",
+          *args, **kwargs):
     super(GNNEncoder, self).__init__()
     self.sparse = sparse
     self.node_feature_only = node_feature_only
     self.hidden_dim = hidden_dim
+    self.prediction_type = prediction_type
     time_embed_dim = hidden_dim // 2
     self.node_embed = nn.Linear(hidden_dim, hidden_dim)
     self.edge_embed = nn.Linear(hidden_dim, hidden_dim)
@@ -320,6 +332,15 @@ class GNNEncoder(nn.Module):
             nn.Conv2d(hidden_dim, out_channels, kernel_size=1, bias=True)
         # ),
     )
+
+    if self.node_feature_only and self.prediction_type == "static_pairwise":
+        self.edge_out = nn.Sequential(
+            normalization(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 3),
+        )
 
     self.layers = nn.ModuleList([
         GNNLayer(hidden_dim, aggregation, norm, learn_norm, track_norm, gated)
@@ -409,9 +430,20 @@ class GNNEncoder(nn.Module):
     edge_index = edge_index.long()
 
     x, e = self.sparse_encoding(x, e, edge_index, time_emb)
-    x = x.reshape((1, x_shape[0], -1, x.shape[-1])).permute((0, 3, 1, 2))
-    x = self.out(x).reshape(-1, x_shape[0]).permute((1, 0))
-    return x
+    
+    node_pred = x.reshape(
+        (1, x_shape[0], -1, x.shape[-1])
+    ).permute((0, 3, 1, 2))
+    
+    node_pred = self.out(node_pred).reshape(
+        -1, x_shape[0]
+    ).permute((1, 0))
+    
+    if self.prediction_type == "static_pairwise":
+        edge_pred = self.edge_out(e)
+        return node_pred, edge_pred
+    
+    return node_pred
 
   def sparse_encoding(self, x, e, edge_index, time_emb):
     adj_matrix = SparseTensor(

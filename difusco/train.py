@@ -63,8 +63,22 @@ def arg_parser():
   parser.add_argument('--do_train', action='store_true')
   parser.add_argument('--do_test', action='store_true')
   parser.add_argument('--do_valid_only', action='store_true')
+  
+  parser.add_argument(
+      '--prediction_type',
+      type=str,
+      default='unary',
+      choices=['unary', 'static_pairwise'],
+  )
+
 
   args = parser.parse_args()
+
+  # Temporary: disable Gaussian + static pairwise
+  if args.prediction_type == 'static_pairwise' and args.diffusion_type != 'categorical':
+      raise ValueError(
+          "static_pairwise prediction is currently implemented only for categorical diffusion"
+      )
   return args
 
 

@@ -40,6 +40,102 @@ class MISModel(COMetaModel):
   def forward(self, x, t, edge_index):
     return self.model(x, t, edge_index=edge_index)
 
+  def static_pairwise_categorical_loss(
+      self,
+      node_pred,
+      edge_pred,
+      node_labels,
+      edge_index,
+      pair_mask,
+  ):
+    pair_edges = edge_index[:, pair_mask]
+  
+    pair_u = pair_edges[0]
+    pair_v = pair_edges[1]
+  
+    # State encoding:
+    # 00 -> 0
+    # 01 -> 1
+    # 10 -> 2
+    # 11 -> 3, which must never happen for an MIS solution.
+    pair_targets = (
+      2 * node_labels[pair_u].long()
+      + node_labels[pair_v].long()
+    )
+  
+    if torch.any(pair_targets == 3):
+      raise ValueError(
+          "Invalid MIS target: matching edge has state 11."
+      )
+  
+    # Find vertices which belong to one of the selected pairs.
+    matched_nodes = torch.zeros(
+      node_labels.shape[0],
+      dtype=torch.bool,
+      device=node_labels.device,
+    )
+  
+    matched_nodes[pair_u] = True
+    matched_nodes[pair_v] = True
+  
+    unmatched_nodes = ~matched_nodes
+
+    pair_loss = F.cross_entropy(
+      edge_pred[pair_mask],
+      pair_targets,
+      reduction="sum",
+    )
+
+    if unmatched_nodes.any():
+      unary_loss = F.cross_entropy(
+        node_pred[unmatched_nodes],
+        node_labels[unmatched_nodes].long(),
+        reduction="sum",
+      )
+    else:
+      unary_loss = node_pred.sum() * 0.0
+
+    num_blocks = (
+      pair_targets.numel()
+      + unmatched_nodes.sum()
+    )
+
+    return (pair_loss + unary_loss) / num_blocks
+
+  def static_pairwise_to_unary_probs(
+      self,
+      node_pred,
+      edge_pred,
+      edge_index,
+      pair_mask,
+  ):
+    node_prob = node_pred.softmax(dim=-1)
+
+    pair_prob = edge_pred[pair_mask].softmax(dim=-1)
+    pair_edges = edge_index[:, pair_mask]
+
+    pair_u = pair_edges[0]
+    pair_v = pair_edges[1]
+
+    # pair_prob ordering:
+    # 0 = 00
+    # 1 = 01
+    # 2 = 10
+
+    p00 = pair_prob[:, 0]
+    p01 = pair_prob[:, 1]
+    p10 = pair_prob[:, 2]
+
+    unary_prob = node_prob.clone()
+
+    unary_prob[pair_u, 0] = p00 + p01
+    unary_prob[pair_u, 1] = p10
+
+    unary_prob[pair_v, 0] = p00 + p10
+    unary_prob[pair_v, 1] = p01
+
+    return unary_prob
+
   def categorical_training_step(self, batch, batch_idx):
     _, graph_data, point_indicator = batch
     t = np.random.randint(1, self.diffusion.T + 1, point_indicator.shape[0]).astype(int)
@@ -63,14 +159,31 @@ class MISModel(COMetaModel):
     edge_index = edge_index.to(node_labels.device).reshape(2, -1)
 
     # Denoise
-    x0_pred = self.forward(
+    pair_mask = graph_data.pair_mask.bool()
+
+    prediction = self.forward(
         xt.float().to(node_labels.device),
         t.float().to(node_labels.device),
         edge_index,
     )
 
-    loss_func = nn.CrossEntropyLoss()
-    loss = loss_func(x0_pred, node_labels)
+
+    #loss_func = nn.CrossEntropyLoss()
+    #loss = loss_func(x0_pred, node_labels)
+
+    if self.args.prediction_type == "unary":
+        loss = F.cross_entropy(prediction, node_labels)
+    
+    else:
+        node_pred, edge_pred = prediction
+    
+        loss = self.static_pairwise_categorical_loss(
+            node_pred=node_pred,
+            edge_pred=edge_pred,
+            node_labels=node_labels,
+            edge_index=edge_index,
+            pair_mask=pair_mask,
+        )
     self.log("train/loss", loss)
     return loss
 
@@ -115,17 +228,55 @@ class MISModel(COMetaModel):
     elif self.diffusion_type == 'categorical':
       return self.categorical_training_step(batch, batch_idx)
 
-  def categorical_denoise_step(self, xt, t, device, edge_index=None, target_t=None):
+  def categorical_denoise_step(
+          self, 
+          xt, 
+          t, 
+          device, 
+          edge_index=None, 
+          pair_mask=None,
+          target_t=None
+  ):
     with torch.no_grad():
       t = torch.from_numpy(t).view(1)
-      x0_pred = self.forward(
-          xt.float().to(device),
-          t.float().to(device),
-          edge_index.long().to(device) if edge_index is not None else None,
+      #x0_pred = self.forward(
+      #    xt.float().to(device),
+      #    t.float().to(device),
+      #    edge_index.long().to(device) if edge_index is not None else None,
+      #)
+      #x0_pred_prob = x0_pred.reshape((1, xt.shape[0], -1, 2)).softmax(dim=-1)
+      prediction = self.forward(
+        xt.float().to(device),
+        t.float().to(device),
+        edge_index.long().to(device),
       )
-      x0_pred_prob = x0_pred.reshape((1, xt.shape[0], -1, 2)).softmax(dim=-1)
-      xt = self.categorical_posterior(target_t, t, x0_pred_prob, xt)
-      return xt
+      
+      if self.args.prediction_type == "static_pairwise":
+        node_pred, edge_pred = prediction
+      
+        x0_pred_prob = self.static_pairwise_to_unary_probs(
+          node_pred,
+          edge_pred,
+          edge_index,
+          pair_mask,
+        )
+      else:
+        x0_pred_prob = prediction.softmax(dim=-1)
+
+      x0_pred_prob = x0_pred_prob.reshape(
+        (1, xt.shape[0], -1, 2)
+      )
+      
+      xt = self.categorical_posterior(
+        target_t,
+        t,
+        x0_pred_prob,
+        xt,
+      )
+      
+      return xt 
+      #xt = self.categorical_posterior(target_t, t, x0_pred_prob, xt)
+      #return xt
 
   def gaussian_denoise_step(self, xt, t, device, edge_index=None, target_t=None):
     with torch.no_grad():
@@ -140,6 +291,11 @@ class MISModel(COMetaModel):
       return xt
 
   def test_step(self, batch, batch_idx, draw=False, split='test'):
+    pair_mask = None
+
+    if self.args.prediction_type == "static_pairwise":
+      pair_mask = graph_data.pair_mask.bool().to(device)
+
     device = batch[-1].device
 
     real_batch_idx, graph_data, point_indicator = batch
@@ -167,6 +323,10 @@ class MISModel(COMetaModel):
 
       if self.args.parallel_sampling > 1:
         edge_index = self.duplicate_edge_index(edge_index, node_labels.shape[0], device)
+        if pair_mask is not None:
+          pair_mask = pair_mask.repeat(
+              self.args.parallel_sampling
+          )
 
       batch_size = 1
       steps = self.args.inference_diffusion_steps
@@ -183,7 +343,13 @@ class MISModel(COMetaModel):
               xt, t1, device, edge_index, target_t=t2)
         else:
           xt = self.categorical_denoise_step(
-              xt, t1, device, edge_index, target_t=t2)
+            xt,
+            t1,
+            device,
+            edge_index,
+            pair_mask=pair_mask,
+            target_t=t2,
+          )
 
       if self.diffusion_type == 'gaussian':
         predict_labels = xt.float().cpu().detach().numpy() * 0.5 + 0.5
