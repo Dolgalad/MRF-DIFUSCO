@@ -282,6 +282,291 @@ class MISModel(COMetaModel):
     elif self.diffusion_type == 'categorical':
       return self.categorical_training_step(batch, batch_idx)
 
+  def static_pairwise_block_posterior(
+      self,
+      target_t,
+      t,
+      pair_x0_prob,
+      xt,
+      pair_u,
+      pair_v,
+  ):
+    """
+    Compute p(z_target | z_source) for matched pair blocks.
+  
+    pair_x0_prob:
+        [M, 3] clean-state probabilities over
+        {00, 01, 10}
+  
+    returns:
+        [M, 4] posterior probabilities over
+        {00, 01, 10, 11}
+    """
+  
+    device = pair_x0_prob.device
+    diffusion = self.diffusion
+  
+    source_t = int(t.item())
+  
+    if target_t is None:
+      target_t_value = source_t - 1
+    else:
+      target_t_value = int(np.asarray(target_t).item())
+  
+    #
+    # Existing binary cumulative transition matrices.
+    #
+  
+    Qbar_source_binary = torch.from_numpy(
+        diffusion.Q_bar[source_t]
+    ).float().to(device)
+  
+    Qbar_target_binary = torch.from_numpy(
+        diffusion.Q_bar[target_t_value]
+    ).float().to(device)
+  
+    #
+    # Convert to 4-state pair transitions.
+    #
+    # State order:
+    # 00, 01, 10, 11
+    #
+  
+    Qbar_source_pair = torch.kron(
+        Qbar_source_binary,
+        Qbar_source_binary,
+    )
+  
+    Qbar_target_pair = torch.kron(
+        Qbar_target_binary,
+        Qbar_target_binary,
+    )
+  
+    #
+    # Same construction as categorical_posterior():
+    #
+    # Q_target->source =
+    # inv(Qbar_target) @ Qbar_source
+    #
+  
+    Q_pair = torch.linalg.solve(
+        Qbar_target_pair,
+        Qbar_source_pair,
+    )
+  
+    #
+    # Current noisy state z_source.
+    #
+  
+    z_source = (
+        2 * xt[pair_u].long()
+        + xt[pair_v].long()
+    )
+  
+    num_pairs = z_source.shape[0]
+  
+    posterior = torch.zeros(
+        num_pairs,
+        4,
+        dtype=pair_x0_prob.dtype,
+        device=device,
+    )
+  
+    #
+    # Sum over the three possible clean states.
+    #
+  
+    for z0 in range(3):
+  
+      # p(z_target | z_source, z0)
+      #
+      # This mirrors categorical_posterior().
+  
+      source_onehot = F.one_hot(
+          z_source,
+          num_classes=4,
+      ).float()
+  
+      part_1 = torch.matmul(
+          source_onehot,
+          Q_pair.T,
+      )
+  
+      part_2 = Qbar_target_pair[z0]
+  
+      part_3 = (
+          Qbar_source_pair[z0]
+          * source_onehot
+      ).sum(
+          dim=-1,
+          keepdim=True,
+      )
+  
+      conditional = (
+          part_1 * part_2
+      ) / part_3.clamp_min(1e-12)
+  
+      posterior += (
+          conditional
+          * pair_x0_prob[:, z0].unsqueeze(-1)
+      )
+  
+    posterior = posterior / posterior.sum(
+        dim=-1,
+        keepdim=True,
+    ).clamp_min(1e-12)
+  
+
+    assert torch.isfinite(posterior).all(), (
+      "Non-finite values in pair posterior"
+    )
+    
+    assert (posterior >= -1e-6).all(), (
+      f"Negative pair posterior values: min={posterior.min().item()}"
+    )
+    
+    assert torch.allclose(
+        posterior.sum(dim=-1),
+        torch.ones(
+            posterior.shape[0],
+            device=posterior.device,
+            dtype=posterior.dtype,
+        ),
+        atol=1e-5,
+    ), (
+        f"Pair posterior does not sum to 1: "
+        f"{posterior.sum(dim=-1)}"
+    )
+
+    return posterior
+
+  def static_pairwise_block_denoise_step(
+      self,
+      node_pred,
+      edge_pred,
+      edge_index,
+      pair_mask,
+      xt,
+      t,
+      target_t,
+  ):
+    """
+    Denoising step using true joint diffusion for matched pair blocks.
+  
+    Clean pair states:
+        0 = 00
+        1 = 01
+        2 = 10
+  
+    Noisy pair states:
+        0 = 00
+        1 = 01
+        2 = 10
+        3 = 11
+    """
+  
+    device = node_pred.device
+  
+    #
+    # 1. First compute the ordinary unary posterior for ALL nodes.
+    #    These values will remain untouched for unmatched nodes.
+    #
+  
+    node_prob = node_pred.softmax(dim=-1)
+  
+    unary_x0_prob = node_prob.reshape(
+        (1, xt.shape[0], -1, 2)
+    )
+  
+    xt_next = self.categorical_posterior(
+        target_t,
+        t,
+        unary_x0_prob,
+        xt,
+    )
+  
+    #
+    # 2. Retrieve the fixed matching.
+    #
+  
+    pair_edges = edge_index[:, pair_mask]
+  
+    if pair_edges.shape[1] == 0:
+      return xt_next
+  
+    pair_u = pair_edges[0]
+    pair_v = pair_edges[1]
+  
+    #
+    # 3. Model prediction of the CLEAN pair state.
+    #
+    # Shape: [num_pairs, 3]
+    #
+  
+    pair_x0_prob = edge_pred[pair_mask].softmax(dim=-1)
+  
+    #
+    # 4. Build the pair-block posterior.
+    #
+  
+    pair_posterior = self.static_pairwise_block_posterior(
+        target_t=target_t,
+        t=t,
+        pair_x0_prob=pair_x0_prob,
+        xt=xt,
+        pair_u=pair_u,
+        pair_v=pair_v,
+    )
+  
+    #
+    # 5. Sample/update the pair jointly.
+    #
+  
+    if target_t is None:
+      target_t_value = int(t.item()) - 1
+    else:
+      target_t_value = int(np.asarray(target_t).item())
+  
+    if target_t_value > 0:
+  
+      pair_state = torch.multinomial(
+          pair_posterior,
+          num_samples=1,
+      ).squeeze(-1)
+  
+      # state encoding:
+      #
+      # 0 -> 00
+      # 1 -> 01
+      # 2 -> 10
+      # 3 -> 11
+  
+      pair_u_next = pair_state // 2
+      pair_v_next = pair_state % 2
+  
+      xt_next[pair_u] = pair_u_next.to(xt_next.dtype)
+      xt_next[pair_v] = pair_v_next.to(xt_next.dtype)
+  
+    else:
+  
+      # Final step: retain continuous probabilities just like
+      # categorical_posterior() does at target_t == 0.
+  
+      p_u_1 = (
+          pair_posterior[:, 2]
+          + pair_posterior[:, 3]
+      )
+  
+      p_v_1 = (
+          pair_posterior[:, 1]
+          + pair_posterior[:, 3]
+      )
+  
+      xt_next[pair_u] = p_u_1
+      xt_next[pair_v] = p_v_1
+  
+    return xt_next
+
   def categorical_denoise_step(
           self, 
           xt, 
@@ -307,13 +592,35 @@ class MISModel(COMetaModel):
       
       if self.args.prediction_type == "static_pairwise":
         node_pred, edge_pred = prediction
-      
-        x0_pred_prob = self.static_pairwise_to_unary_probs(
-          node_pred,
-          edge_pred,
-          edge_index,
-          pair_mask,
-        )
+
+        if self.args.pairwise_diffusion_mode == "marginal":
+          x0_pred_prob = self.static_pairwise_to_unary_probs(
+            node_pred,
+            edge_pred,
+            edge_index,
+            pair_mask,
+          )
+
+          x0_pred_prob = x0_pred_prob.reshape(
+              (1, xt.shape[0], -1, 2)
+          )
+
+          return self.categorical_posterior(
+              target_t,
+              t,
+              x0_pred_prob,
+              xt,
+          )
+        elif self.args.pairwise_diffusion_mode == "block":
+          return self.static_pairwise_block_denoise_step(
+              node_pred,
+              edge_pred,
+              edge_index,
+              pair_mask,
+              xt,
+              t,
+              target_t,
+          )
       else:
         x0_pred_prob = prediction.softmax(dim=-1)
 

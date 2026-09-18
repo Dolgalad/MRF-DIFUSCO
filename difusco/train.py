@@ -75,6 +75,13 @@ def arg_parser():
   )
 
   parser.add_argument(
+      '--pairwise_diffusion_mode',
+      type=str,
+      default='marginal',
+      choices=['marginal', 'block'],
+  )
+
+  parser.add_argument(
       '--validation_split_label_dir',
       type=str,
       default=None,
@@ -87,6 +94,7 @@ def arg_parser():
       default=None,
       help="Directory containing labels for test split (used for MIS).",
   )
+
 
 
   args = parser.parse_args()
