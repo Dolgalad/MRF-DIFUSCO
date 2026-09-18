@@ -152,6 +152,8 @@ class MISModel(COMetaModel):
       + node_labels.numel()
     )
 
+    print(f"pairwise = {pair_loss/pair_targets.numel()}, unary = {unary_loss/node_labels.numel()}")
+
     return (pair_loss + unary_loss) / num_blocks
 
   def static_pairwise_to_unary_probs(
