@@ -89,6 +89,17 @@ class MISDataset(torch.utils.data.Dataset):
 
     pair_edges = edges[pair_mask]
 
+    matched_nodes = np.unique(pair_edges.reshape(-1))
+    num_matched_nodes = len(matched_nodes)
+    num_unmatched_nodes = num_nodes - num_matched_nodes
+    
+    print(
+      f"[matching] nodes={num_nodes}, "
+      f"pairs={pair_edges.shape[0]}, "
+      f"covered={num_matched_nodes}, "
+      f"uncovered={num_unmatched_nodes}"
+    )
+
     if pair_edges.shape[0] > 0:
         flat_nodes = pair_edges.reshape(-1)
         assert len(np.unique(flat_nodes)) == len(flat_nodes)
