@@ -127,18 +127,29 @@ class MISModel(COMetaModel):
       reduction="sum",
     )
 
-    if unmatched_nodes.any():
-      unary_loss = F.cross_entropy(
-        node_pred[unmatched_nodes],
-        node_labels[unmatched_nodes].long(),
-        reduction="sum",
-      )
-    else:
-      unary_loss = node_pred.sum() * 0.0
+    unary_loss = F.cross_entropy(
+      node_pred,
+      node_labels.long(),
+      reduction="sum",
+    )
 
+
+    #if unmatched_nodes.any():
+    #  unary_loss = F.cross_entropy(
+    #    node_pred[unmatched_nodes],
+    #    node_labels[unmatched_nodes].long(),
+    #    reduction="sum",
+    #  )
+    #else:
+    #  unary_loss = node_pred.sum() * 0.0
+
+    #num_blocks = (
+    #  pair_targets.numel()
+    #  + unmatched_nodes.sum()
+    #)
     num_blocks = (
       pair_targets.numel()
-      + unmatched_nodes.sum()
+      + node_labels.numel()
     )
 
     return (pair_loss + unary_loss) / num_blocks
