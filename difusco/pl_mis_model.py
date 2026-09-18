@@ -86,6 +86,11 @@ class MISModel(COMetaModel):
   
     edge_u = edge_index[0]
     edge_v = edge_index[1]
+
+    non_self_loop = edge_u != edge_v
+
+    pair_u = edge_u[non_self_loop]
+    pair_v = edge_v[non_self_loop]
   
     # Pair states:
     # 00 -> 0
@@ -93,31 +98,31 @@ class MISModel(COMetaModel):
     # 10 -> 2
     # 11 -> invalid for an MIS solution
     pair_targets = (
-        2 * node_labels[edge_u].long()
-        + node_labels[edge_v].long()
+        2 * node_labels[pair_u].long()
+        + node_labels[pair_v].long()
     )
 
     bad = pair_targets == 3
 
-    if bad.any():
-      bad_idx = torch.nonzero(bad, as_tuple=False).flatten()
-    
-      print("FOUND INVALID MIS EDGES")
-      print("num invalid directed edges:", bad_idx.numel())
-    
-      for k in bad_idx[:20]:
-        u = int(edge_index[0, k])
-        v = int(edge_index[1, k])
-        yu = int(node_labels[u])
-        yv = int(node_labels[v])
-    
-        print(
-            f"edge_idx={int(k)} "
-            f"edge=({u},{v}) "
-            f"labels=({yu},{yv})"
-        )
-    
-      raise ValueError("Invalid MIS target: graph edge has state 11.")
+    #if bad.any():
+    #  bad_idx = torch.nonzero(bad, as_tuple=False).flatten()
+    #
+    #  print("FOUND INVALID MIS EDGES")
+    #  print("num invalid directed edges:", bad_idx.numel())
+    #
+    #  for k in bad_idx[:20]:
+    #    u = int(edge_index[0, k])
+    #    v = int(edge_index[1, k])
+    #    yu = int(node_labels[u])
+    #    yv = int(node_labels[v])
+    #
+    #    print(
+    #        f"edge_idx={int(k)} "
+    #        f"edge=({u},{v}) "
+    #        f"labels=({yu},{yv})"
+    #    )
+    #
+    #  raise ValueError("Invalid MIS target: graph edge has state 11.")
   
     if torch.any(pair_targets == 3):
       raise ValueError(
@@ -125,7 +130,7 @@ class MISModel(COMetaModel):
       )
   
     pair_loss = F.cross_entropy(
-        edge_pred,
+        edge_pred[non_self_loop],
         pair_targets,
         reduction="sum",
     )
