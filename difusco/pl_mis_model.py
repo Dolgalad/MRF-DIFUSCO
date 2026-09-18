@@ -78,81 +78,53 @@ class MISModel(COMetaModel):
       edge_index,
       pair_mask,
   ):
-
     assert pair_mask.dtype == torch.bool
     assert pair_mask.shape[0] == edge_pred.shape[0]
     assert edge_pred.shape[1] == 3
     assert node_pred.shape[0] == node_labels.shape[0]
     assert node_pred.shape[1] == 2
-
-    pair_edges = edge_index[:, pair_mask]
   
-    pair_u = pair_edges[0]
-    pair_v = pair_edges[1]
-
-    if pair_u.numel() > 0:
-      matched = torch.cat([pair_u, pair_v])
-      assert torch.unique(matched).numel() == matched.numel()
+    edge_u = edge_index[0]
+    edge_v = edge_index[1]
   
-    # State encoding:
+    # Pair states:
     # 00 -> 0
     # 01 -> 1
     # 10 -> 2
-    # 11 -> 3, which must never happen for an MIS solution.
+    # 11 -> invalid for an MIS solution
     pair_targets = (
-      2 * node_labels[pair_u].long()
-      + node_labels[pair_v].long()
+        2 * node_labels[edge_u].long()
+        + node_labels[edge_v].long()
     )
   
     if torch.any(pair_targets == 3):
       raise ValueError(
-          "Invalid MIS target: matching edge has state 11."
+          "Invalid MIS target: graph edge has state 11."
       )
   
-    # Find vertices which belong to one of the selected pairs.
-    matched_nodes = torch.zeros(
-      node_labels.shape[0],
-      dtype=torch.bool,
-      device=node_labels.device,
-    )
-  
-    matched_nodes[pair_u] = True
-    matched_nodes[pair_v] = True
-  
-    unmatched_nodes = ~matched_nodes
-
     pair_loss = F.cross_entropy(
-      edge_pred[pair_mask],
-      pair_targets,
-      reduction="sum",
+        edge_pred,
+        pair_targets,
+        reduction="sum",
     )
-
+  
     unary_loss = F.cross_entropy(
-      node_pred,
-      node_labels.long(),
-      reduction="sum",
+        node_pred,
+        node_labels.long(),
+        reduction="sum",
     )
-
-
-    #if unmatched_nodes.any():
-    #  unary_loss = F.cross_entropy(
-    #    node_pred[unmatched_nodes],
-    #    node_labels[unmatched_nodes].long(),
-    #    reduction="sum",
-    #  )
-    #else:
-    #  unary_loss = node_pred.sum() * 0.0
-
-    #num_blocks = (
-    #  pair_targets.numel()
-    #  + unmatched_nodes.sum()
-    #)
+  
     num_blocks = (
-      pair_targets.numel()
-      + node_labels.numel()
+        edge_pred.shape[0]
+        + node_labels.numel()
     )
+  
+    loss = (pair_loss + unary_loss) / num_blocks
 
-    return (pair_loss + unary_loss) / num_blocks
+    unary_loss_mean = unary_loss / node_labels.numel()
+    pair_loss_mean = pair_loss / edge_pred.shape[0]
+
+    return loss, unary_loss_mean, pair_loss_mean
 
   def static_pairwise_to_unary_probs(
       self,
@@ -225,17 +197,20 @@ class MISModel(COMetaModel):
 
     if self.args.prediction_type == "unary":
         loss = F.cross_entropy(prediction, node_labels)
-    
+        self.log("train/unary_loss", loss)
     else:
         node_pred, edge_pred = prediction
     
-        loss = self.static_pairwise_categorical_loss(
+        loss, unary_loss_mean, pair_loss_mean = self.static_pairwise_categorical_loss(
             node_pred=node_pred,
             edge_pred=edge_pred,
             node_labels=node_labels,
             edge_index=edge_index,
             pair_mask=pair_mask,
         )
+        self.log("train/unary_loss", unary_loss_mean)
+        self.log("train/pairwise_loss", pair_loss_mean)
+
     self.log("train/loss", loss)
     return loss
 
