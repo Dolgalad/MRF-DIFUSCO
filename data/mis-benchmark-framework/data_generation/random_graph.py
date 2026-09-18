@@ -9,11 +9,19 @@ import os
 from logzero import logger
 import tqdm
 from utils import run_command_with_live_output
+import numpy as np
 
 class GraphSampler(ABC):
     @abstractmethod
-    def generate_graph(self):
+    def generate_graph(self, seed=None):
         pass
+    def sample_n(self, min_n, max_n, seed):
+        if min_n == max_n:
+            n = min_n
+        else:
+            rng = np.random.default_rng(seed)
+            n = rng.integers(min_n, max_n+1)
+        return n
 
 
 class ErdosRenyi(GraphSampler):
@@ -25,9 +33,10 @@ class ErdosRenyi(GraphSampler):
     def __str__(self):
         return f"ER_{self.min_n}_{self.max_n}_{self.p}"
 
-    def generate_graph(self):
-        n = random.randint(self.min_n, self.max_n)
-        return nx.erdos_renyi_graph(n, self.p)
+    def generate_graph(self, seed=None):
+        n = self.sample_n(self.min_n, self.max_n, seed)
+        #n = random.randint(self.min_n, self.max_n)
+        return nx.erdos_renyi_graph(n, self.p, seed=seed)
 
 
 class BarabasiAlbert(GraphSampler):
@@ -39,9 +48,10 @@ class BarabasiAlbert(GraphSampler):
     def __str__(self):
         return f"BA_{self.min_n}_{self.max_n}_{self.m}"
 
-    def generate_graph(self):
-        n = random.randint(self.min_n, self.max_n)
-        return nx.barabasi_albert_graph(n, min(self.m, n))
+    def generate_graph(self, seed=None):
+        #n = random.randint(self.min_n, self.max_n)
+        n = self.sample_n(self.min_n, self.max_n, seed)
+        return nx.barabasi_albert_graph(n, min(self.m, n-1), seed=seed)
 
 
 class HolmeKim(GraphSampler):
@@ -54,7 +64,7 @@ class HolmeKim(GraphSampler):
     def __str__(self):
         return f"HK_{self.min_n}_{self.max_n}_{self.m}_{self.p}"
 
-    def generate_graph(self):
+    def generate_graph(self, seed=None):
         n = random.randint(self.min_n, self.max_n)
         return nx.powerlaw_cluster_graph(n, min(self.m, n), self.p)
 
@@ -69,7 +79,7 @@ class WattsStrogatz(GraphSampler):
     def __str__(self):
         return f"WS_{self.min_n}_{self.max_n}_{self.k}_{self.p}"
 
-    def generate_graph(self):
+    def generate_graph(self, seed=None):
         n = random.randint(self.min_n, self.max_n)
         return nx.watts_strogatz_graph(n, self.k, self.p)
 
@@ -100,7 +110,7 @@ class HyperbolicRandomGraph(GraphSampler):
     def __str__(self):
         return f"HRG_{self.min_n}_{self.max_n}_{self.alpha}_{self.t}_{self.degree}"
 
-    def generate_graph(self):
+    def generate_graph(self, seed=None):
         n = random.randint(self.min_n, self.max_n)
         command = [self.binary_path, "-n", str(n), "-alpha", str(self.alpha), "-t", str(self.t), "-deg", str(self.degree), "-threads", str(self.threads), "-edge", "1", "-file", str(self.tmp_path / "tmp")]
         run_command_with_live_output(command)
@@ -118,15 +128,25 @@ class HyperbolicRandomGraph(GraphSampler):
         return G
 
 class RandomGraphGenerator(DataGenerator):
-    def __init__(self, output_path, graph_sampler: GraphSampler, num_graphs = 1):
+    def __init__(self, 
+                 output_path, 
+                 graph_sampler: GraphSampler, 
+                 num_graphs = 1, 
+                 seed_base=0,
+                 start_idx=0,
+                 ):
         self.num_graphs = num_graphs
         self.output_path = output_path
         self.graph_sampler = graph_sampler
+        self.seed_base = seed_base
+        self.start_idx = start_idx
 
     def generate(self, gen_labels = False, weighted = False):
-        for i in tqdm.tqdm(range(self.num_graphs)):
-            stub = f"{self.graph_sampler}_{i}"
-            G = self.graph_sampler.generate_graph()
+        for local_i in tqdm.tqdm(range(self.num_graphs)):
+            global_i = self.start_idx + local_i
+            seed = self.base_seed + global_i
+            stub = f"{self.graph_sampler}_{global_i}"
+            G = self.graph_sampler.generate_graph(seed=seed)
 
             if weighted:
                 weight_mapping = { vertex: int(weight) for vertex, weight in zip(G.nodes, self.random_weight(G.number_of_nodes(), sigma=30, mu=100)) }
