@@ -95,6 +95,15 @@ def arg_parser():
       help="Directory containing labels for test split (used for MIS).",
   )
 
+  parser.add_argument(
+      "--matching_generator",
+      type=str,
+      default="greedy",
+      choices=[
+          "greedy",
+          "balanced",
+      ],
+  )
 
 
   args = parser.parse_args()

@@ -6,10 +6,14 @@ import pickle5 as pickle
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from torch_geometric.data import Data as GraphData
 
-from difusco.matchings import balanced_matching_family
+from matchings import (
+    balanced_matching_family,
+    greedy_balanced_matching_family,
+)
 
 def greedy_static_matching(edges, num_nodes):
     """Return indices of a deterministic maximal matching.
@@ -91,6 +95,7 @@ class MISDataset(torch.utils.data.Dataset):
                matching_seed=0,
                matching_vertex_balance=0.05,
                matching_cache_dir=None,
+               matching_generator="greedy",
                ):
     self.data_file = data_file
     self.file_lines = glob.glob(data_file)
@@ -101,6 +106,7 @@ class MISDataset(torch.utils.data.Dataset):
     self.matching_seed = matching_seed
     self.matching_vertex_balance = matching_vertex_balance
     self.matching_cache_dir = matching_cache_dir
+    self.matching_generator = matching_generator
 
     print(
         f'Loaded "{data_file}" with '
@@ -148,12 +154,34 @@ class MISDataset(torch.utils.data.Dataset):
           for matching in family_array
       ]
   
-    family = balanced_matching_family(
-        graph,
-        num_matchings=self.num_pairwise_matchings,
-        seed=self.matching_seed,
-        vertex_balance=self.matching_vertex_balance,
-    )
+    #family = balanced_matching_family(
+    #    graph,
+    #    num_matchings=self.num_pairwise_matchings,
+    #    seed=self.matching_seed,
+    #    vertex_balance=self.matching_vertex_balance,
+    #)
+
+    if self.matching_generator == "balanced":
+      family = balanced_matching_family(
+          graph,
+          num_matchings=self.num_pairwise_matchings,
+          seed=self.matching_seed,
+          vertex_balance=self.matching_vertex_balance,
+      )
+    
+    elif self.matching_generator == "greedy":
+      family = greedy_balanced_matching_family(
+          graph,
+          num_matchings=self.num_pairwise_matchings,
+          seed=self.matching_seed,
+          vertex_balance=self.matching_vertex_balance,
+      )
+    
+    else:
+      raise ValueError(
+          f"Unknown matching generator: "
+          f"{self.matching_generator}"
+      )
   
     save_matching_family(
         cache_path,
@@ -173,7 +201,15 @@ class MISDataset(torch.utils.data.Dataset):
   
     num_created = 0
   
-    for idx in range(num_graphs):
+    for idx in tqdm(
+        range(num_graphs),
+        desc=(
+            f"Matching cache "
+            f"({self.matching_generator}, "
+            f"K={self.num_pairwise_matchings})"
+        ),
+        unit="graph",
+    ):
       cache_path = self._matching_cache_path(idx)
   
       if os.path.exists(cache_path):
