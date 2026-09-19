@@ -187,3 +187,38 @@ def balanced_matching_family(
             vertex_count[v] += 1
 
     return family
+
+def matching_family_stats(graph, family):
+    edges = [
+        tuple(sorted((int(u), int(v))))
+        for u, v in graph.edges()
+    ]
+
+    edge_to_idx = {
+        edge: i
+        for i, edge in enumerate(edges)
+    }
+
+    usage = np.zeros(
+        len(edges),
+        dtype=np.int64,
+    )
+
+    sizes = []
+
+    for matching in family:
+        sizes.append(len(matching))
+
+        for u, v in matching:
+            edge = tuple(sorted((int(u), int(v))))
+            usage[edge_to_idx[edge]] += 1
+
+    return {
+        "matching_size_min": int(np.min(sizes)),
+        "matching_size_mean": float(np.mean(sizes)),
+        "matching_size_max": int(np.max(sizes)),
+        "edge_usage_min": int(np.min(usage)),
+        "edge_usage_mean": float(np.mean(usage)),
+        "edge_usage_max": int(np.max(usage)),
+        "edge_usage_std": float(np.std(usage)),
+    }
