@@ -671,6 +671,9 @@ class MISModel(COMetaModel):
       
       if self.args.prediction_type in {"static_pairwise", "random_pairwise"}:
         node_pred, edge_pred = prediction
+        assert pair_mask is not None
+        assert pair_mask.dtype == torch.bool
+        assert pair_mask.shape[0] == edge_index.shape[1]
 
         if self.args.pairwise_diffusion_mode == "marginal":
           x0_pred_prob = self.static_pairwise_to_unary_probs(
