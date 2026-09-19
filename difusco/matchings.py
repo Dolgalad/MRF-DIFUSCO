@@ -1,6 +1,6 @@
 import random
 import networkx as nx
-
+import numpy as np
 
 def greedy_balanced_matching_family(
     graph,
