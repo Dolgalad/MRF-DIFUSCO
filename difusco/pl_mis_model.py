@@ -76,7 +76,7 @@ class MISModel(COMetaModel):
             self.args.storage_path,
             self.args.validation_split,
         ),
-        data_label_dir=validation_label_dir,
+        data_label_dir=val_label_dir,
         prediction_type=self.args.prediction_type,
         num_pairwise_matchings=self.args.num_pairwise_matchings,
         matching_seed=self.args.matching_seed,
@@ -106,6 +106,48 @@ class MISModel(COMetaModel):
 
   def forward(self, x, t, edge_index):
     return self.model(x, t, edge_index=edge_index)
+
+  def select_random_pair_mask(
+      self,
+      graph_data,
+      edge_index,
+  ):
+    membership = (
+        graph_data.pair_membership
+        .bool()
+        .to(edge_index.device)
+    )
+  
+    num_matchings = membership.shape[1]
+  
+    # Determine which graph owns each edge.
+    edge_batch = graph_data.batch[
+        edge_index[0].long()
+    ]
+  
+    num_graphs = int(graph_data.num_graphs)
+  
+    # Pick one cached matching independently for every graph.
+    selected_matching = torch.randint(
+        low=0,
+        high=num_matchings,
+        size=(num_graphs,),
+        device=edge_index.device,
+    )
+  
+    selected_for_edge = selected_matching[
+        edge_batch
+    ]
+  
+    edge_ids = torch.arange(
+        membership.shape[0],
+        device=edge_index.device,
+    )
+  
+    return membership[
+        edge_ids,
+        selected_for_edge,
+    ]
 
   def static_pairwise_categorical_loss(
       self,
@@ -627,7 +669,7 @@ class MISModel(COMetaModel):
         edge_index.long().to(device),
       )
       
-      if self.args.prediction_type == "static_pairwise":
+      if self.args.prediction_type in {"static_pairwise", "random_pairwise"}:
         node_pred, edge_pred = prediction
 
         if self.args.pairwise_diffusion_mode == "marginal":
@@ -693,21 +735,33 @@ class MISModel(COMetaModel):
 
     device = batch[-1].device
 
-    pair_mask = None
+    static_pair_mask = None
+    
     if self.args.prediction_type == "static_pairwise":
-      pair_mask = graph_data.pair_mask.bool().to(device)
-
+      static_pair_mask = (
+          graph_data.pair_mask
+          .bool()
+          .to(device)
+      )
+    
     node_labels = graph_data.x
-    edge_index = graph_data.edge_index
-
+    
+    base_edge_index = (
+        graph_data.edge_index
+        .to(node_labels.device)
+        .reshape(2, -1)
+    )
+    
     stacked_predict_labels = []
-    edge_index = edge_index.to(node_labels.device).reshape(2, -1)
-    edge_index_np = edge_index.cpu().numpy()
+    
+    edge_index_np = base_edge_index.cpu().numpy()
+
     adj_mat = scipy.sparse.coo_matrix(
         (np.ones_like(edge_index_np[0]), (edge_index_np[0], edge_index_np[1])),
     )
 
     for _ in range(self.args.sequential_sampling):
+      edge_index = base_edge_index
       xt = torch.randn_like(node_labels.float())
       if self.args.parallel_sampling > 1:
         xt = xt.repeat(self.args.parallel_sampling, 1, 1)
@@ -720,33 +774,64 @@ class MISModel(COMetaModel):
       xt = xt.reshape(-1)
 
       if self.args.parallel_sampling > 1:
-        edge_index = self.duplicate_edge_index(edge_index, node_labels.shape[0], device)
-        if pair_mask is not None:
-          pair_mask = pair_mask.repeat(
-              self.args.parallel_sampling
-          )
+        edge_index = self.duplicate_edge_index(
+            base_edge_index,
+            node_labels.shape[0],
+            device,
+        )
 
       batch_size = 1
       steps = self.args.inference_diffusion_steps
       time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
                                         T=self.diffusion.T, inference_T=steps)
 
+
       for i in range(steps):
         t1, t2 = time_schedule(i)
-        t1 = np.array([t1 for _ in range(batch_size)]).astype(int)
-        t2 = np.array([t2 for _ in range(batch_size)]).astype(int)
-
-        if self.diffusion_type == 'gaussian':
+    
+        t1 = np.array(
+            [t1 for _ in range(batch_size)]
+        ).astype(int)
+    
+        t2 = np.array(
+            [t2 for _ in range(batch_size)]
+        ).astype(int)
+    
+        pair_mask = None
+    
+        if self.args.prediction_type == "static_pairwise":
+          pair_mask = static_pair_mask
+    
+        elif self.args.prediction_type == "random_pairwise":
+          pair_mask = self.select_random_pair_mask(
+              graph_data,
+              base_edge_index,
+          )
+    
+        if (
+            pair_mask is not None
+            and self.args.parallel_sampling > 1
+        ):
+          pair_mask = pair_mask.repeat(
+              self.args.parallel_sampling
+          )
+    
+        if self.diffusion_type == "gaussian":
           xt = self.gaussian_denoise_step(
-              xt, t1, device, edge_index, target_t=t2)
+              xt,
+              t1,
+              device,
+              edge_index,
+              target_t=t2,
+          )
         else:
           xt = self.categorical_denoise_step(
-            xt,
-            t1,
-            device,
-            edge_index,
-            pair_mask=pair_mask,
-            target_t=t2,
+              xt,
+              t1,
+              device,
+              edge_index,
+              pair_mask=pair_mask,
+              target_t=t2,
           )
 
       if self.diffusion_type == 'gaussian':
