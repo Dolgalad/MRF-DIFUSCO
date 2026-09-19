@@ -71,17 +71,14 @@ def matching_family_to_membership(
 
   return membership
 
-def save_matching_family(path, family):
-  """Save the raw matching family, independent of edge ordering."""
+def save_matching_membership(path, membership):
   os.makedirs(os.path.dirname(path), exist_ok=True)
-
-  family_array = np.asarray(family, dtype=np.int64)
 
   tmp_path = path + ".tmp.npz"
 
   np.savez_compressed(
       tmp_path,
-      family=family_array,
+      pair_membership=membership,
   )
 
   os.replace(tmp_path, path)
@@ -135,32 +132,20 @@ class MISDataset(torch.utils.data.Dataset):
         self.matching_cache_dir,
         f"{base}.npz",
     )
-  def _load_or_create_matching_family(
+
+  def _load_or_create_matching_membership(
       self,
       idx,
       graph,
+      undirected_edges,
+      num_total_edges,
   ):
     cache_path = self._matching_cache_path(idx)
   
     if os.path.exists(cache_path):
       with np.load(cache_path) as data:
-        family_array = data["family"]
+        return data["pair_membership"]
   
-      return [
-          [
-              tuple(map(int, edge))
-              for edge in matching
-          ]
-          for matching in family_array
-      ]
-  
-    #family = balanced_matching_family(
-    #    graph,
-    #    num_matchings=self.num_pairwise_matchings,
-    #    seed=self.matching_seed,
-    #    vertex_balance=self.matching_vertex_balance,
-    #)
-
     if self.matching_generator == "balanced":
       family = balanced_matching_family(
           graph,
@@ -168,7 +153,7 @@ class MISDataset(torch.utils.data.Dataset):
           seed=self.matching_seed,
           vertex_balance=self.matching_vertex_balance,
       )
-    
+  
     elif self.matching_generator == "greedy":
       family = greedy_balanced_matching_family(
           graph,
@@ -176,19 +161,24 @@ class MISDataset(torch.utils.data.Dataset):
           seed=self.matching_seed,
           vertex_balance=self.matching_vertex_balance,
       )
-    
+  
     else:
       raise ValueError(
-          f"Unknown matching generator: "
-          f"{self.matching_generator}"
+          f"Unknown matching generator: {self.matching_generator}"
       )
   
-    save_matching_family(
-        cache_path,
-        family,
+    pair_membership = matching_family_to_membership(
+        undirected_edges=undirected_edges,
+        family=family,
+        num_total_edges=num_total_edges,
     )
   
-    return family
+    save_matching_membership(
+        cache_path,
+        pair_membership,
+    )
+  
+    return pair_membership
 
   def precompute_matching_cache(self):
     num_graphs = len(self.file_lines)
@@ -217,11 +207,26 @@ class MISDataset(torch.utils.data.Dataset):
   
       with open(self.file_lines[idx], "rb") as f:
         graph = pickle.load(f)
-  
-      self._load_or_create_matching_family(
-          idx,
-          graph,
+
+      undirected_edges = np.array(
+          graph.edges,
+          dtype=np.int64,
       )
+      
+      num_nodes = graph.number_of_nodes()
+      
+      num_total_edges = (
+          2 * undirected_edges.shape[0]
+          + num_nodes
+      )
+      
+      self._load_or_create_matching_membership(
+          idx=idx,
+          graph=graph,
+          undirected_edges=undirected_edges,
+          num_total_edges=num_total_edges,
+      )
+  
   
       num_created += 1
   
@@ -282,17 +287,12 @@ class MISDataset(torch.utils.data.Dataset):
     pair_membership = None
 
     if self.prediction_type == "random_pairwise":
-      family = self._load_or_create_matching_family(
-          idx,
-          graph,
-      )
-    
-      pair_membership = matching_family_to_membership(
+      pair_membership = self._load_or_create_matching_membership(
+          idx=idx,
+          graph=graph,
           undirected_edges=undirected_edges,
-          family=family,
           num_total_edges=edges.shape[0],
       )
-
     pair_edges = edges[pair_mask]
 
     matched_nodes = np.unique(pair_edges.reshape(-1))

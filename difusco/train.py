@@ -71,7 +71,7 @@ def arg_parser():
       '--prediction_type',
       type=str,
       default='unary',
-      choices=['unary', 'static_pairwise'],
+      choices=['unary', 'static_pairwise', 'random_pairwise'],
   )
 
   parser.add_argument(
@@ -105,11 +105,35 @@ def arg_parser():
       ],
   )
 
+  parser.add_argument(
+      "--num_pairwise_matchings",
+      type=int,
+      default=32,
+  )
+  
+  parser.add_argument(
+      "--matching_seed",
+      type=int,
+      default=0,
+  )
+  
+  parser.add_argument(
+      "--matching_vertex_balance",
+      type=float,
+      default=0.05,
+  )
+  
+  parser.add_argument(
+      "--matching_cache_dir",
+      type=str,
+      default="data/matching_cache",
+  )
+
 
   args = parser.parse_args()
 
   # Temporary: disable Gaussian + static pairwise
-  if args.prediction_type == 'static_pairwise':
+  if args.prediction_type in {'static_pairwise', 'random_pairwise'}:
     if args.task != 'mis':
       raise ValueError(
           "static_pairwise prediction is currently implemented only for MIS"

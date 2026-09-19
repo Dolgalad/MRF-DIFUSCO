@@ -41,6 +41,19 @@ class MISModel(COMetaModel):
           self.args.storage_path,
           self.args.test_split_label_dir,
       )
+
+    matching_config_name = (
+        f"{self.args.matching_generator}"
+        f"_K{self.args.num_pairwise_matchings}"
+        f"_seed{self.args.matching_seed}"
+        f"_vb{self.args.matching_vertex_balance}"
+    )
+    
+    matching_cache_root = os.path.join(
+        self.args.storage_path,
+        self.args.matching_cache_dir,
+        matching_config_name,
+    )
     
     self.train_dataset = MISDataset(
         data_file=os.path.join(
@@ -48,24 +61,48 @@ class MISModel(COMetaModel):
             self.args.training_split,
         ),
         data_label_dir=train_label_dir,
-    )
-    
+        prediction_type=self.args.prediction_type,
+        num_pairwise_matchings=self.args.num_pairwise_matchings,
+        matching_seed=self.args.matching_seed,
+        matching_vertex_balance=self.args.matching_vertex_balance,
+        matching_cache_dir=os.path.join(
+            matching_cache_root,
+            "train",
+        ),
+        matching_generator=self.args.matching_generator,
+    )    
     self.validation_dataset = MISDataset(
         data_file=os.path.join(
             self.args.storage_path,
             self.args.validation_split,
         ),
-        data_label_dir=val_label_dir,
-    )
-    
+        data_label_dir=validation_label_dir,
+        prediction_type=self.args.prediction_type,
+        num_pairwise_matchings=self.args.num_pairwise_matchings,
+        matching_seed=self.args.matching_seed,
+        matching_vertex_balance=self.args.matching_vertex_balance,
+        matching_cache_dir=os.path.join(
+            matching_cache_root,
+            "val",
+        ),
+        matching_generator=self.args.matching_generator,
+    )    
     self.test_dataset = MISDataset(
         data_file=os.path.join(
             self.args.storage_path,
             self.args.test_split,
         ),
         data_label_dir=test_label_dir,
+        prediction_type=self.args.prediction_type,
+        num_pairwise_matchings=self.args.num_pairwise_matchings,
+        matching_seed=self.args.matching_seed,
+        matching_vertex_balance=self.args.matching_vertex_balance,
+        matching_cache_dir=os.path.join(
+            matching_cache_root,
+            "test",
+        ),
+        matching_generator=self.args.matching_generator,
     )
-
 
   def forward(self, x, t, edge_index):
     return self.model(x, t, edge_index=edge_index)

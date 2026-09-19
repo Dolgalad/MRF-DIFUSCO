@@ -333,7 +333,7 @@ class GNNEncoder(nn.Module):
         # ),
     )
 
-    if self.node_feature_only and self.prediction_type == "static_pairwise":
+    if self.node_feature_only and self.prediction_type in {"static_pairwise", "random_pairwise"}:
         self.edge_out = nn.Sequential(
             normalization(hidden_dim),
             nn.ReLU(),
@@ -439,7 +439,7 @@ class GNNEncoder(nn.Module):
         -1, x_shape[0]
     ).permute((1, 0))
     
-    if self.prediction_type == "static_pairwise":
+    if self.prediction_type in {"static_pairwise", "random_pairwise"}:
         edge_pred = self.edge_out(e)
         return node_pred, edge_pred
     
