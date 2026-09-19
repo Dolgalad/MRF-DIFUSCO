@@ -9,6 +9,7 @@ import torch
 
 from torch_geometric.data import Data as GraphData
 
+from difusco.matchings import balanced_matching_family
 
 def greedy_static_matching(edges, num_nodes):
     """Return indices of a deterministic maximal matching.
@@ -37,12 +38,167 @@ def greedy_static_matching(edges, num_nodes):
 
     return np.asarray(matching_edge_indices, dtype=np.int64)
 
+def matching_family_to_membership(
+    undirected_edges,
+    family,
+    num_total_edges,
+):
+  """Convert a family of edge-pair lists to [E_total, K] masks.
+
+  Only the first orientation of each undirected edge is activated,
+  matching the convention currently used by pair_mask.
+  """
+  num_matchings = len(family)
+
+  membership = np.zeros(
+      (num_total_edges, num_matchings),
+      dtype=bool,
+  )
+
+  edge_to_idx = {
+      tuple(sorted((int(u), int(v)))): i
+      for i, (u, v) in enumerate(undirected_edges)
+  }
+
+  for matching_idx, matching in enumerate(family):
+    for u, v in matching:
+      edge = tuple(sorted((int(u), int(v))))
+      membership[edge_to_idx[edge], matching_idx] = True
+
+  return membership
+
+def save_matching_family(path, family):
+  """Save the raw matching family, independent of edge ordering."""
+  os.makedirs(os.path.dirname(path), exist_ok=True)
+
+  family_array = np.asarray(family, dtype=np.int64)
+
+  tmp_path = path + ".tmp.npz"
+
+  np.savez_compressed(
+      tmp_path,
+      family=family_array,
+  )
+
+  os.replace(tmp_path, path)
+
 class MISDataset(torch.utils.data.Dataset):
-  def __init__(self, data_file, data_label_dir=None):
+  def __init__(self, 
+               data_file, 
+               data_label_dir=None,
+               prediction_type="unary",
+               num_pairwise_matchings=32,
+               matching_seed=0,
+               matching_vertex_balance=0.05,
+               matching_cache_dir=None,
+               ):
     self.data_file = data_file
     self.file_lines = glob.glob(data_file)
     self.data_label_dir = data_label_dir
-    print(f'Loaded "{data_file}" with {len(self.file_lines)} examples')
+
+    self.prediction_type = prediction_type
+    self.num_pairwise_matchings = num_pairwise_matchings
+    self.matching_seed = matching_seed
+    self.matching_vertex_balance = matching_vertex_balance
+    self.matching_cache_dir = matching_cache_dir
+
+    print(
+        f'Loaded "{data_file}" with '
+        f'{len(self.file_lines)} examples'
+    )
+
+    if self.prediction_type == "random_pairwise":
+      if self.matching_cache_dir is None:
+        raise ValueError(
+            "matching_cache_dir is required for random_pairwise"
+        )
+
+      os.makedirs(
+          self.matching_cache_dir,
+          exist_ok=True,
+      )
+
+      self.precompute_matching_cache()
+  def _matching_cache_path(self, idx):
+    graph_file = self.file_lines[idx]
+
+    base = os.path.basename(graph_file)
+    base = os.path.splitext(base)[0]
+
+    return os.path.join(
+        self.matching_cache_dir,
+        f"{base}.npz",
+    )
+  def _load_or_create_matching_family(
+      self,
+      idx,
+      graph,
+  ):
+    cache_path = self._matching_cache_path(idx)
+  
+    if os.path.exists(cache_path):
+      with np.load(cache_path) as data:
+        family_array = data["family"]
+  
+      return [
+          [
+              tuple(map(int, edge))
+              for edge in matching
+          ]
+          for matching in family_array
+      ]
+  
+    family = balanced_matching_family(
+        graph,
+        num_matchings=self.num_pairwise_matchings,
+        seed=self.matching_seed,
+        vertex_balance=self.matching_vertex_balance,
+    )
+  
+    save_matching_family(
+        cache_path,
+        family,
+    )
+  
+    return family
+
+  def precompute_matching_cache(self):
+    num_graphs = len(self.file_lines)
+  
+    print(
+        f"Preparing balanced matching cache: "
+        f"{num_graphs} graphs, "
+        f"{self.num_pairwise_matchings} matchings/graph"
+    )
+  
+    num_created = 0
+  
+    for idx in range(num_graphs):
+      cache_path = self._matching_cache_path(idx)
+  
+      if os.path.exists(cache_path):
+        continue
+  
+      with open(self.file_lines[idx], "rb") as f:
+        graph = pickle.load(f)
+  
+      self._load_or_create_matching_family(
+          idx,
+          graph,
+      )
+  
+      num_created += 1
+  
+      if num_created % 100 == 0:
+        print(
+            f"[matching cache] created "
+            f"{num_created} new files"
+        )
+  
+    print(
+        f"[matching cache] done: "
+        f"{num_created} new files"
+    )
 
   def __len__(self):
     return len(self.file_lines)
@@ -87,6 +243,20 @@ class MISDataset(torch.utils.data.Dataset):
     pair_mask = np.zeros(edges.shape[0], dtype=bool)
     pair_mask[matching_edge_indices] = True
 
+    pair_membership = None
+
+    if self.prediction_type == "random_pairwise":
+      family = self._load_or_create_matching_family(
+          idx,
+          graph,
+      )
+    
+      pair_membership = matching_family_to_membership(
+          undirected_edges=undirected_edges,
+          family=family,
+          num_total_edges=edges.shape[0],
+      )
+
     pair_edges = edges[pair_mask]
 
     matched_nodes = np.unique(pair_edges.reshape(-1))
@@ -107,20 +277,58 @@ class MISDataset(torch.utils.data.Dataset):
 
     edges = edges.T
 
-
-
-    return num_nodes, node_labels, edges, pair_mask
-
-  def __getitem__(self, idx):
-    num_nodes, node_labels, edge_index, pair_mask = self.get_example(idx)
-    graph_data = GraphData(x=torch.from_numpy(node_labels),
-                           edge_index=torch.from_numpy(edge_index),
-                           pair_mask=torch.from_numpy(pair_mask),
-                           )
-
-    point_indicator = np.array([num_nodes], dtype=np.int64)
     return (
-        torch.LongTensor(np.array([idx], dtype=np.int64)),
+        num_nodes,
+        node_labels,
+        edges,
+        pair_mask,
+        pair_membership,
+    )
+
+  #def __getitem__(self, idx):
+  #  num_nodes, node_labels, edge_index, pair_mask = self.get_example(idx)
+  #  graph_data = GraphData(x=torch.from_numpy(node_labels),
+  #                         edge_index=torch.from_numpy(edge_index),
+  #                         pair_mask=torch.from_numpy(pair_mask),
+  #                         )
+
+  #  point_indicator = np.array([num_nodes], dtype=np.int64)
+  #  return (
+  #      torch.LongTensor(np.array([idx], dtype=np.int64)),
+  #      graph_data,
+  #      torch.from_numpy(point_indicator).long(),
+  #  )
+  def __getitem__(self, idx):
+    (
+        num_nodes,
+        node_labels,
+        edge_index,
+        pair_mask,
+        pair_membership,
+    ) = self.get_example(idx)
+  
+    graph_kwargs = {
+        "x": torch.from_numpy(node_labels),
+        "edge_index": torch.from_numpy(edge_index),
+        "pair_mask": torch.from_numpy(pair_mask),
+    }
+  
+    if pair_membership is not None:
+      graph_kwargs["pair_membership"] = (
+          torch.from_numpy(pair_membership)
+      )
+  
+    graph_data = GraphData(**graph_kwargs)
+  
+    point_indicator = np.array(
+        [num_nodes],
+        dtype=np.int64,
+    )
+  
+    return (
+        torch.LongTensor(
+            np.array([idx], dtype=np.int64)
+        ),
         graph_data,
         torch.from_numpy(point_indicator).long(),
     )
