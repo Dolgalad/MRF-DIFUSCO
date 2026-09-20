@@ -3,7 +3,7 @@
 import glob
 import os
 import pickle5 as pickle
-
+import time
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -71,17 +71,36 @@ def matching_family_to_membership(
 
   return membership
 
+#def save_matching_membership(path, membership):
+#  os.makedirs(os.path.dirname(path), exist_ok=True)
+#
+#  tmp_path = path + ".tmp.npz"
+#
+#  np.savez_compressed(
+#      tmp_path,
+#      pair_membership=membership,
+#  )
+#
+#  os.replace(tmp_path, path)
 def save_matching_membership(path, membership):
   os.makedirs(os.path.dirname(path), exist_ok=True)
 
-  tmp_path = path + ".tmp.npz"
-
-  np.savez_compressed(
-      tmp_path,
-      pair_membership=membership,
+  tmp_path = (
+      path
+      + f".tmp.{os.getpid()}.npz"
   )
 
-  os.replace(tmp_path, path)
+  try:
+    np.savez_compressed(
+        tmp_path,
+        pair_membership=membership,
+    )
+
+    os.replace(tmp_path, path)
+
+  finally:
+    if os.path.exists(tmp_path):
+      os.remove(tmp_path)
 
 class MISDataset(torch.utils.data.Dataset):
   def __init__(self, 
@@ -133,6 +152,52 @@ class MISDataset(torch.utils.data.Dataset):
         f"{base}.npz",
     )
 
+  #def _load_or_create_matching_membership(
+  #    self,
+  #    idx,
+  #    graph,
+  #    undirected_edges,
+  #    num_total_edges,
+  #):
+  #  cache_path = self._matching_cache_path(idx)
+  #
+  #  if os.path.exists(cache_path):
+  #    with np.load(cache_path) as data:
+  #      return data["pair_membership"]
+  #
+  #  if self.matching_generator == "balanced":
+  #    family = balanced_matching_family(
+  #        graph,
+  #        num_matchings=self.num_pairwise_matchings,
+  #        seed=self.matching_seed,
+  #        vertex_balance=self.matching_vertex_balance,
+  #    )
+  #
+  #  elif self.matching_generator == "greedy":
+  #    family = greedy_balanced_matching_family(
+  #        graph,
+  #        num_matchings=self.num_pairwise_matchings,
+  #        seed=self.matching_seed,
+  #        vertex_balance=self.matching_vertex_balance,
+  #    )
+  #
+  #  else:
+  #    raise ValueError(
+  #        f"Unknown matching generator: {self.matching_generator}"
+  #    )
+  #
+  #  pair_membership = matching_family_to_membership(
+  #      undirected_edges=undirected_edges,
+  #      family=family,
+  #      num_total_edges=num_total_edges,
+  #  )
+  #
+  #  save_matching_membership(
+  #      cache_path,
+  #      pair_membership,
+  #  )
+  #
+  #  return pair_membership
   def _load_or_create_matching_membership(
       self,
       idx,
@@ -141,44 +206,81 @@ class MISDataset(torch.utils.data.Dataset):
       num_total_edges,
   ):
     cache_path = self._matching_cache_path(idx)
+    lock_path = cache_path + ".lock"
   
+    # Fast path: already cached.
     if os.path.exists(cache_path):
       with np.load(cache_path) as data:
         return data["pair_membership"]
   
-    if self.matching_generator == "balanced":
-      family = balanced_matching_family(
-          graph,
-          num_matchings=self.num_pairwise_matchings,
-          seed=self.matching_seed,
-          vertex_balance=self.matching_vertex_balance,
+    # Try to become the process responsible for generating this graph.
+    have_lock = False
+  
+    while not have_lock:
+      try:
+        fd = os.open(
+            lock_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        )
+        os.close(fd)
+        have_lock = True
+  
+      except FileExistsError:
+        # Another process is generating this cache entry.
+        #
+        # If it finishes, use the result instead of recomputing it.
+        if os.path.exists(cache_path):
+          with np.load(cache_path) as data:
+            return data["pair_membership"]
+  
+        time.sleep(0.1)
+  
+    try:
+      # Check again after obtaining the lock. Another process may have
+      # completed the file between our initial check and lock acquisition.
+      if os.path.exists(cache_path):
+        with np.load(cache_path) as data:
+          return data["pair_membership"]
+  
+      if self.matching_generator == "balanced":
+        family = balanced_matching_family(
+            graph,
+            num_matchings=self.num_pairwise_matchings,
+            seed=self.matching_seed,
+            vertex_balance=self.matching_vertex_balance,
+        )
+  
+      elif self.matching_generator == "greedy":
+        family = greedy_balanced_matching_family(
+            graph,
+            num_matchings=self.num_pairwise_matchings,
+            seed=self.matching_seed,
+            vertex_balance=self.matching_vertex_balance,
+        )
+  
+      else:
+        raise ValueError(
+            f"Unknown matching generator: {self.matching_generator}"
+        )
+  
+      pair_membership = matching_family_to_membership(
+          undirected_edges=undirected_edges,
+          family=family,
+          num_total_edges=num_total_edges,
       )
   
-    elif self.matching_generator == "greedy":
-      family = greedy_balanced_matching_family(
-          graph,
-          num_matchings=self.num_pairwise_matchings,
-          seed=self.matching_seed,
-          vertex_balance=self.matching_vertex_balance,
+      save_matching_membership(
+          cache_path,
+          pair_membership,
       )
   
-    else:
-      raise ValueError(
-          f"Unknown matching generator: {self.matching_generator}"
-      )
+      return pair_membership
   
-    pair_membership = matching_family_to_membership(
-        undirected_edges=undirected_edges,
-        family=family,
-        num_total_edges=num_total_edges,
-    )
-  
-    save_matching_membership(
-        cache_path,
-        pair_membership,
-    )
-  
-    return pair_membership
+    finally:
+      try:
+        os.remove(lock_path)
+      except FileNotFoundError:
+        pass
 
   def precompute_matching_cache(self):
     num_graphs = len(self.file_lines)
