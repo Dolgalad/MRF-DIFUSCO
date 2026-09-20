@@ -144,7 +144,7 @@ class RandomGraphGenerator(DataGenerator):
     def generate(self, gen_labels = False, weighted = False):
         for local_i in tqdm.tqdm(range(self.num_graphs)):
             global_i = self.start_idx + local_i
-            seed = self.base_seed + global_i
+            seed = self.seed_base + global_i
             stub = f"{self.graph_sampler}_{global_i}"
             G = self.graph_sampler.generate_graph(seed=seed)
 
