@@ -1,3 +1,6 @@
+import os
+os.path.append("..")
+
 import difusco
 from difusco.co_datasets.mis_dataset import MISDataset
 
