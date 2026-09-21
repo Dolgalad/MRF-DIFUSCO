@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from torch_geometric.data import Data as GraphData
 
-from difusco.matchings import (
+from matchings import (
     balanced_matching_family,
     greedy_balanced_matching_family,
 )
