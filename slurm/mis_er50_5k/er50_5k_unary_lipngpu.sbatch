@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --time=20:00:00
-#SBATCH --array=0-5
+#SBATCH --array=0-23
 #SBATCH --output=/data1/schulz/slurm-%x-%A_%a.log
 #SBATCH --error=/data1/schulz/slurm-%x-%A_%a.log
 #SBATCH --nodelist=lipn-rtx[1-3]
@@ -22,11 +22,20 @@ ENV_ROOT="/data1/schulz/conda-envs/difusco-pairs-gpu"
 PYTHON="${ENV_ROOT}/bin/python"
 
 DIFFUSION_VALUES=(2 4 8 16 32 64 128 256)
-DIFFUSION_STEPS="${DIFFUSION_VALUES[$SLURM_ARRAY_TASK_ID]}"
+SEEDS=(2023 2024 2025)
+
+NUM_DIFFUSIONS=${#DIFFUSION_VALUES[@]}
+NUM_SEEDS=${#SEEDS[@]}
+
+DIFFUSION_IDX=$((SLURM_ARRAY_TASK_ID / NUM_SEEDS))
+SEED_IDX=$((SLURM_ARRAY_TASK_ID % NUM_SEEDS))
+
+DIFFUSION_STEPS="${DIFFUSION_VALUES[$DIFFUSION_IDX]}"
+SEED="${SEEDS[$SEED_IDX]}"
 
 DATA_ROOT="/data1/schulz/MRF-DIFUSCO-data/mis_er50_5k"
 SWEEP_ROOT="/data1/schulz/MRF-DIFUSCO-runs/li0ngpu_er50_5k_diffusion_sweep"
-RUN_DIR="${SWEEP_ROOT}/unary/diff_${DIFFUSION_STEPS}"
+RUN_DIR="${SWEEP_ROOT}/unary/diff_${DIFFUSION_STEPS}/seed_${SEED}"
 LOG_DIR="${RUN_DIR}/logs"
 
 [[ -x "$PYTHON" ]] || { echo "Python not found: $PYTHON"; exit 1; }
@@ -47,6 +56,7 @@ mkdir -p "$XDG_CACHE_HOME" "$TORCH_HOME"
 
 
 {
+    echo "seed=${SEED}"
     echo "mode=unary"
     echo "diffusion_steps=${DIFFUSION_STEPS}"
     echo "job_id=${SLURM_JOB_ID}"
@@ -92,7 +102,8 @@ PY
   --n_layers 12 \
   --hidden_dim 256 \
   --project_name er50_5k_diffusion_sweep \
-  --wandb_logger_name "unary-d${DIFFUSION_STEPS}" \
+  --wandb_logger_name "unary-d${DIFFUSION_STEPS}-s${SEED}" \
   --do_train \
   --do_test \
+  --seed "$SEED" \
   2>&1 | tee "$LOG_DIR/train_test.log"
