@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --time=20:00:00
-#SBATCH --array=0-23
+#SBATCH --array=0-26
 #SBATCH --output=/data1/schulz/slurm-%x-%A_%a.log
 #SBATCH --error=/data1/schulz/slurm-%x-%A_%a.log
 #SBATCH --nodelist=lipn-rtx[1-3]
@@ -21,7 +21,7 @@ cd "$PROJECT_DIR"
 ENV_ROOT="/data1/schulz/conda-envs/difusco-pairs-gpu"
 PYTHON="${ENV_ROOT}/bin/python"
 
-DIFFUSION_VALUES=(2 4 8 16 32 64 128 256)
+DIFFUSION_VALUES=(2 4 8 12 16 24 32 48 64)
 SEEDS=(2023 2024 2025)
 
 NUM_DIFFUSIONS=${#DIFFUSION_VALUES[@]}
@@ -53,7 +53,6 @@ export TORCH_HOME="/data1/schulz/.cache/torch"
 export WANDB_MODE=offline
 
 mkdir -p "$XDG_CACHE_HOME" "$TORCH_HOME"
-
 
 {
     echo "seed=${SEED}"

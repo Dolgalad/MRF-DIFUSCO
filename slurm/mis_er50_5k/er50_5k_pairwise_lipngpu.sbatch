@@ -3,28 +3,43 @@
 #SBATCH --job-name=er50_5k_pairwise_lipngpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --time=20:00:00
-#SBATCH --array=0-5
+#SBATCH --array=0-26
 #SBATCH --output=/data1/schulz/slurm-%x-%A_%a.log
 #SBATCH --error=/data1/schulz/slurm-%x-%A_%a.log
 #SBATCH --nodelist=lipn-rtx[1-3]
 #SBATCH --chdir=/data1/schulz/MRF-DIFUSCO
 set -euo pipefail
 
-source "$HOME/miniconda3/etc/profile.d/conda.sh"
-conda activate difusco-pairs-gpu
+PROJECT_ROOT="/data1/schulz/MRF-DIFUSCO"
+PROJECT_DIR="${PROJECT_ROOT}/difusco"
 
-cd "$HOME/MRF-DIFUSCO/difusco"
+cd "$PROJECT_DIR"
 
-DIFFUSION_VALUES=(2 4 8 16 32 64)
-DIFFUSION_STEPS="${DIFFUSION_VALUES[$SLURM_ARRAY_TASK_ID]}"
+ENV_ROOT="/data1/schulz/conda-envs/difusco-pairs-gpu"
+PYTHON="${ENV_ROOT}/bin/python"
+
+DIFFUSION_VALUES=(2 4 8 12 16 24 32 48 64)
+SEEDS=(2023 2024 2025)
+
+NUM_DIFFUSIONS=${#DIFFUSION_VALUES[@]}
+NUM_SEEDS=${#SEEDS[@]}
+
+DIFFUSION_IDX=$((SLURM_ARRAY_TASK_ID / NUM_SEEDS))
+SEED_IDX=$((SLURM_ARRAY_TASK_ID % NUM_SEEDS))
+
+DIFFUSION_STEPS="${DIFFUSION_VALUES[$DIFFUSION_IDX]}"
+SEED="${SEEDS[$SEED_IDX]}"
 
 DATA_ROOT="/data1/schulz/MRF-DIFUSCO-data/mis_er50_5k"
 SWEEP_ROOT="/data1/schulz/MRF-DIFUSCO-runs/li0ngpu_er50_5k_diffusion_sweep"
-RUN_DIR="${SWEEP_ROOT}/static_pairwise/diff_${DIFFUSION_STEPS}"
+RUN_DIR="${SWEEP_ROOT}/static_pairwise/diff_${DIFFUSION_STEPS}/seed_${SEED}"
 LOG_DIR="${RUN_DIR}/logs"
+
+[[ -x "$PYTHON" ]] || { echo "Python not found: $PYTHON"; exit 1; }
+[[ -d "$DATA_ROOT" ]] || { echo "Dataset not found: $DATA_ROOT"; exit 1; }
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
@@ -32,9 +47,15 @@ SLURM_LOG="/data1/schulz/slurm-${SLURM_JOB_NAME}-${SLURM_ARRAY_JOB_ID}_${SLURM_A
 
 ln -sf "$SLURM_LOG" "$LOG_DIR/slurm.log"
 
+export PATH="${ENV_ROOT}/bin:${PATH}"
+export XDG_CACHE_HOME="/data1/schulz/.cache"
+export TORCH_HOME="/data1/schulz/.cache/torch"
 export WANDB_MODE=offline
 
+mkdir -p "$XDG_CACHE_HOME" "$TORCH_HOME"
+
 {
+    echo "seed=${SEED}"
     echo "mode=static_pairwise"
     echo "diffusion_steps=${DIFFUSION_STEPS}"
     echo "job_id=${SLURM_JOB_ID}"
@@ -42,11 +63,13 @@ export WANDB_MODE=offline
     echo "array_task_id=${SLURM_ARRAY_TASK_ID}"
     echo "hostname=$(hostname)"
     echo "start_time=$(date --iso-8601=seconds)"
-    echo "git_commit=$(git -C "$HOME/MRF-DIFUSCO" rev-parse HEAD)"
+    echo "git_commit=$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
     echo "dataset=${DATA_ROOT}"
-    echo "environment=${CONDA_DEFAULT_ENV}"
-    python --version
-    python - <<'PY'
+    echo "environment=${ENV_ROOT}"
+    echo "cpus_per_task=${SLURM_CPUS_PER_TASK:-unknown}"
+    echo "cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
+    "$PYTHON" --version
+    "$PYTHON" - <<'PY'
 import torch
 print("torch =", torch.__version__)
 print("torch_cuda =", torch.version.cuda)
@@ -56,7 +79,7 @@ if torch.cuda.is_available():
 PY
 } > "$RUN_DIR/metadata.txt" 2>&1
 
-python train.py \
+"$PYTHON" train.py \
   --task mis \
   --storage_path "$RUN_DIR" \
   --training_split "${DATA_ROOT}/train/*.gpickle" \
@@ -73,12 +96,13 @@ python train.py \
   --sequential_sampling 1 \
   --parallel_sampling 1 \
   --batch_size 64 \
-  --num_workers 16 \
+  --num_workers 8 \
   --num_epochs 50 \
   --n_layers 12 \
   --hidden_dim 256 \
   --project_name er50_5k_diffusion_sweep \
-  --wandb_logger_name "static-pairwise-d${DIFFUSION_STEPS}" \
+  --wandb_logger_name "static-pairwise-d${DIFFUSION_STEPS}-s${SEED}" \
   --do_train \
   --do_test \
+  --seed "$SEED" \
   2>&1 | tee "$LOG_DIR/train_test.log"
