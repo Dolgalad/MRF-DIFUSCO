@@ -8,6 +8,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data
+import json
+import socket
+import subprocess
 
 from co_datasets.mis_dataset import MISDataset
 from utils.diffusion_schedulers import InferenceSchedule
@@ -1045,6 +1048,36 @@ class MISModel(COMetaModel):
 
     splitted_predict_labels = np.split(predict_labels, all_sampling)
 
+    final_score_vectors = [
+        np.asarray(sample, dtype=np.float32)
+        for sample in splitted_predict_labels
+    ]
+
+    score_sum = np.asarray([
+        sample.sum()
+        for sample in final_score_vectors
+    ], dtype=np.float32)
+    
+    score_mean = np.asarray([
+        sample.mean()
+        for sample in final_score_vectors
+    ], dtype=np.float32)
+    
+    score_std = np.asarray([
+        sample.std()
+        for sample in final_score_vectors
+    ], dtype=np.float32)
+    
+    score_max = np.asarray([
+        sample.max()
+        for sample in final_score_vectors
+    ], dtype=np.float32)
+    
+    score_min = np.asarray([
+        sample.min()
+        for sample in final_score_vectors
+    ], dtype=np.float32)
+
     raw_solutions = [
         (sample >= 0.5).astype(np.int64)
         for sample in splitted_predict_labels
@@ -1212,6 +1245,12 @@ class MISModel(COMetaModel):
             model_diffusion_time,
         f"{split}/postprocess_time":
             postprocess_time,
+        f"{split}/final_score_sum":
+            float(score_sum.mean()),
+        f"{split}/final_score_mean":
+            float(score_mean.mean()),
+        f"{split}/final_score_std":
+            float(score_std.mean()),
     })
     for k, v in metrics.items():
       self.log(k, float(v), on_epoch=True, sync_dist=True)
@@ -1221,6 +1260,12 @@ class MISModel(COMetaModel):
         "graph_id": int(batch_idx),
         "batch_idx": int(batch_idx),
         "gt_cost": float(gt_cost),
+
+        "final_score_sum": score_sum,
+        "final_score_mean": score_mean,
+        "final_score_std": score_std,
+        "final_score_min": score_min,
+        "final_score_max": score_max,
     
         "raw_cost": np.asarray([
             m["cost"]
@@ -1294,6 +1339,11 @@ class MISModel(COMetaModel):
     
         "solved_solutions": np.stack(
             solved_solutions,
+            axis=0,
+        ),
+
+        "final_scores": np.stack(
+            final_score_vectors,
             axis=0,
         ),
     
@@ -1426,9 +1476,333 @@ class MISModel(COMetaModel):
 
     )
 
-  def _save_eval_records(self, split, wall_time, peak_allocated_mb=None, peak_reserved_mb=None):
-    pass
-
+  def _save_eval_records(
+      self,
+      split,
+      wall_time,
+      peak_allocated_mb=None,
+      peak_reserved_mb=None,
+  ):
+    records = self._eval_records[split]
+  
+    if len(records) == 0:
+      return
+  
+    rank = getattr(self, "global_rank", 0)
+  
+    output_dir = os.path.join(
+        self.args.storage_path,
+        "logs",
+    )
+    os.makedirs(output_dir, exist_ok=True)
+  
+    npz_path = os.path.join(
+        output_dir,
+        f"{split}_metrics_rank{rank}.npz",
+    )
+  
+    json_path = os.path.join(
+        output_dir,
+        f"{split}_summary_rank{rank}.json",
+    )
+  
+    #
+    # --------------------------------------------------
+    # Stack per-graph quantities.
+    # Result convention:
+    #
+    # [graph, sample, ...]
+    # --------------------------------------------------
+    #
+  
+    graph_ids = np.asarray([
+        r["graph_id"]
+        for r in records
+    ])
+  
+    gt_cost = np.asarray([
+        r["gt_cost"]
+        for r in records
+    ], dtype=np.float32)
+  
+    array_keys = [
+        "final_scores",
+  
+        "raw_cost",
+        "raw_feasible",
+        "raw_violations",
+        "raw_violating_vertices",
+        "raw_violation_rate",
+        "raw_selected_violation_rate",
+        "raw_selected_fraction",
+  
+        "solved_cost",
+  
+        "raw_solutions",
+        "solved_solutions",
+  
+        "postprocess_cost_gain",
+        "postprocess_removed_vertices",
+        "postprocess_added_vertices",
+        "postprocess_total_flips",
+        "postprocess_changed_fraction",
+  
+        "final_score_sum",
+        "final_score_mean",
+        "final_score_std",
+        "final_score_min",
+        "final_score_max",
+    ]
+  
+    arrays = {
+        "schema_version":
+            np.asarray(1, dtype=np.int64),
+  
+        "graph_id":
+            graph_ids,
+  
+        "gt_cost":
+            gt_cost,
+    }
+  
+    for key in array_keys:
+      if key in records[0]:
+        arrays[key] = np.stack([
+            r[key]
+            for r in records
+        ], axis=0)
+  
+    #
+    # Trajectories
+    #
+  
+    trajectory_keys = records[0][
+        "trajectory"
+    ].keys()
+  
+    for key in trajectory_keys:
+      arrays[
+          f"trajectory_{key}"
+      ] = np.stack([
+          r["trajectory"][key]
+          for r in records
+      ], axis=0)
+  
+    #
+    # Schedule
+    #
+    # Same for every graph, so save once.
+    #
+  
+    arrays["schedule_t1"] = np.asarray(
+        records[0]["schedule_t1"],
+        dtype=np.int64,
+    )
+  
+    arrays["schedule_t2"] = np.asarray(
+        records[0]["schedule_t2"],
+        dtype=np.int64,
+    )
+  
+    #
+    # Per-graph timing
+    #
+  
+    arrays["sampling_wall_time"] = np.asarray([
+        r["sampling_wall_time"]
+        for r in records
+    ], dtype=np.float64)
+  
+    arrays["model_diffusion_time"] = np.asarray([
+        r["model_diffusion_time"]
+        for r in records
+    ], dtype=np.float64)
+  
+    arrays["postprocess_time"] = np.asarray([
+        r["postprocess_time"]
+        for r in records
+    ], dtype=np.float64)
+  
+    np.savez_compressed(
+        npz_path,
+        **arrays,
+    )
+  
+    #
+    # --------------------------------------------------
+    # JSON summary / provenance
+    # --------------------------------------------------
+    #
+  
+    try:
+      git_commit = subprocess.check_output(
+          [
+              "git",
+              "rev-parse",
+              "HEAD",
+          ],
+          cwd=os.path.dirname(
+              os.path.abspath(__file__)
+          ),
+          text=True,
+      ).strip()
+    except Exception:
+      git_commit = None
+  
+    gpu_name = None
+  
+    if torch.cuda.is_available():
+      gpu_name = torch.cuda.get_device_name(
+          torch.cuda.current_device()
+      )
+  
+    summary = {
+        "schema_version": 1,
+  
+        "split": split,
+        "rank": int(rank),
+  
+        "num_graphs": len(records),
+  
+        "prediction_type":
+            self.args.prediction_type,
+  
+        "pairwise_diffusion_mode":
+            getattr(
+                self.args,
+                "pairwise_diffusion_mode",
+                None,
+            ),
+  
+        "inference_diffusion_steps":
+            int(
+                self.args.inference_diffusion_steps
+            ),
+  
+        "parallel_sampling":
+            int(self.args.parallel_sampling),
+  
+        "sequential_sampling":
+            int(self.args.sequential_sampling),
+  
+        "num_samples_per_graph":
+            int(
+                self.args.parallel_sampling
+                * self.args.sequential_sampling
+            ),
+  
+        "seed":
+            getattr(
+                self.args,
+                "seed",
+                None,
+            ),
+  
+        "wall_time_seconds":
+            float(wall_time),
+  
+        "peak_gpu_allocated_mb":
+            (
+                float(peak_allocated_mb)
+                if peak_allocated_mb is not None
+                else None
+            ),
+  
+        "peak_gpu_reserved_mb":
+            (
+                float(peak_reserved_mb)
+                if peak_reserved_mb is not None
+                else None
+            ),
+  
+        "hostname":
+            socket.gethostname(),
+  
+        "gpu_name":
+            gpu_name,
+  
+        "git_commit":
+            git_commit,
+  
+        "npz_file":
+            os.path.basename(npz_path),
+    }
+  
+    #
+    # Some useful aggregate summaries.
+    #
+  
+    summary["metrics"] = {
+        "gt_cost_mean":
+            float(gt_cost.mean()),
+  
+        "raw_cost_mean":
+            float(
+                arrays[
+                    "raw_cost"
+                ].mean()
+            ),
+  
+        "raw_feasible_mean":
+            float(
+                arrays[
+                    "raw_feasible"
+                ].mean()
+            ),
+  
+        "raw_violations_mean":
+            float(
+                arrays[
+                    "raw_violations"
+                ].mean()
+            ),
+  
+        "solved_cost_mean":
+            float(
+                arrays[
+                    "solved_cost"
+                ].mean()
+            ),
+  
+        "sampling_wall_time_mean":
+            float(
+                arrays[
+                    "sampling_wall_time"
+                ].mean()
+            ),
+  
+        "model_diffusion_time_mean":
+            float(
+                arrays[
+                    "model_diffusion_time"
+                ].mean()
+            ),
+  
+        "postprocess_time_mean":
+            float(
+                arrays[
+                    "postprocess_time"
+                ].mean()
+            ),
+    }
+  
+    with open(
+        json_path,
+        "w",
+        encoding="utf-8",
+    ) as f:
+      json.dump(
+          summary,
+          f,
+          indent=2,
+          sort_keys=True,
+      )
+  
+    print(
+        f"Saved {split} evaluation data:"
+    )
+    print(f"  {npz_path}")
+    print(f"  {json_path}")
 
   def validation_step(self, batch, batch_idx):
     return self.test_step(batch, batch_idx, split='val')
