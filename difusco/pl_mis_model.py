@@ -963,6 +963,35 @@ class MISModel(COMetaModel):
             np.asarray(resolved_this_step)
         )
 
+      if batch_idx == 0:
+        print("=== FINAL XT DEBUG ===")
+        print("dtype:", xt.dtype)
+        print("shape:", tuple(xt.shape))
+        print("min:", xt.min().item())
+        print("max:", xt.max().item())
+        print("mean:", xt.float().mean().item())
+
+        if xt.numel() <= 200:
+          print("xt:", xt.detach().cpu().numpy())
+
+        print(
+            "unique:",
+            torch.unique(xt.detach().cpu())[:20]
+        )
+        binary_debug = binary_state_from_xt(xt)
+
+        print(
+            "thresholded selected:",
+            binary_debug.sum().item()
+        )
+      if batch_idx == 0 and i == steps - 1:
+        print("FINAL STEP")
+        print("t1:", t1)
+        print("t2:", t2)
+        print("xt min/max before:",
+              prev_states.float().min().item(),
+              prev_states.float().max().item())
+
       if self.diffusion_type == 'gaussian':
         predict_labels = xt.float().cpu().detach().numpy() * 0.5 + 0.5
       else:
