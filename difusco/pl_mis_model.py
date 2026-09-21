@@ -672,7 +672,8 @@ class MISModel(COMetaModel):
           device, 
           edge_index=None, 
           pair_mask=None,
-          target_t=None
+          target_t=None,
+          return_pairwise_prediction=False,
   ):
     with torch.no_grad():
       t = torch.from_numpy(t).view(1)
@@ -694,6 +695,21 @@ class MISModel(COMetaModel):
         assert pair_mask.dtype == torch.bool
         assert pair_mask.shape[0] == edge_index.shape[1]
 
+        decode_pair_probs = None
+        decode_pair_edges = None
+
+        if return_pairwise_prediction:
+          decode_pair_probs = (
+              edge_pred[pair_mask]
+              .softmax(dim=-1)
+              .detach()
+          )
+
+          decode_pair_edges = (
+              edge_index[:, pair_mask]
+              .detach()
+          )
+
         if self.args.pairwise_diffusion_mode == "marginal":
           x0_pred_prob = self.static_pairwise_to_unary_probs(
             node_pred,
@@ -705,15 +721,24 @@ class MISModel(COMetaModel):
           x0_pred_prob = x0_pred_prob.reshape(
               (1, xt.shape[0], -1, 2)
           )
-
-          return self.categorical_posterior(
+          xt_next = self.categorical_posterior(
               target_t,
               t,
               x0_pred_prob,
               xt,
           )
+          
+          if return_pairwise_prediction:
+            return (
+                xt_next,
+                decode_pair_probs,
+                decode_pair_edges,
+            )
+          
+          return xt_next
+
         elif self.args.pairwise_diffusion_mode == "block":
-          return self.static_pairwise_block_denoise_step(
+          xt_next = self.static_pairwise_block_denoise_step(
               node_pred,
               edge_pred,
               edge_index,
@@ -722,6 +747,15 @@ class MISModel(COMetaModel):
               t,
               target_t,
           )
+          
+          if return_pairwise_prediction:
+            return (
+                xt_next,
+                decode_pair_probs,
+                decode_pair_edges,
+            )
+          
+          return xt_next
       else:
         x0_pred_prob = prediction.softmax(dim=-1)
 
@@ -780,6 +814,8 @@ class MISModel(COMetaModel):
     )
     
     stacked_predict_labels = []
+    stacked_pair_probs = []
+    stacked_pair_edges = []
     
     edge_index_np = base_edge_index.cpu().numpy()
 
@@ -902,14 +938,28 @@ class MISModel(COMetaModel):
               target_t=t2,
           )
         else:
-          xt = self.categorical_denoise_step(
+          return_pairwise_prediction = (
+              self.args.mis_decode_mode == "static_pairwise"
+              and self.args.prediction_type == "static_pairwise"
+              and i == steps - 1
+          )
+          denoise_result = self.categorical_denoise_step(
               xt,
               t1,
               device,
               edge_index,
               pair_mask=pair_mask,
               target_t=t2,
+              return_pairwise_prediction=return_pairwise_prediction,
           )
+          if return_pairwise_prediction:
+            (
+                xt,
+                final_pair_probs,
+                final_pair_edges,
+            ) = denoise_result
+          else:
+            xt = denoise_result
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -995,13 +1045,109 @@ class MISModel(COMetaModel):
               prev_states.float().min().item(),
               prev_states.float().max().item())
 
-      if self.diffusion_type == 'gaussian':
-        predict_labels = xt.float().cpu().detach().numpy() * 0.5 + 0.5
-      else:
-        predict_labels = xt.float().cpu().detach().numpy() + 1e-6
-      stacked_predict_labels.append(predict_labels)
+      #if self.diffusion_type == 'gaussian':
+      #  predict_labels = xt.float().cpu().detach().numpy() * 0.5 + 0.5
+      #else:
+      #  predict_labels = xt.float().cpu().detach().numpy() + 1e-6
+      #stacked_predict_labels.append(predict_labels)
 
-      sequential_trajectories.append(trajectory)
+      #sequential_trajectories.append(trajectory)
+      if self.diffusion_type == 'gaussian':
+        predict_labels = (
+            xt.float().cpu().detach().numpy()
+            * 0.5
+            + 0.5
+        )
+      else:
+        predict_labels = (
+            xt.float().cpu().detach().numpy()
+            + 1e-6
+        )
+
+      stacked_predict_labels.append(
+          predict_labels
+      )
+
+      #
+      # Store final static-pairwise predictions separately
+      # for each parallel sample.
+      #
+      if (
+          self.args.mis_decode_mode == "static_pairwise"
+          and self.args.prediction_type == "static_pairwise"
+      ):
+        num_nodes = node_labels.shape[0]
+
+        #
+        # Number of matching edges in ONE graph.
+        #
+        num_pairs = int(
+            static_pair_mask.sum().item()
+        )
+
+        #
+        # final_pair_probs:
+        #
+        #   [parallel_sampling * num_pairs, 3]
+        #
+        # final_pair_edges:
+        #
+        #   [2, parallel_sampling * num_pairs]
+        #
+        for sample_idx in range(
+            self.args.parallel_sampling
+        ):
+          pair_start = (
+              sample_idx * num_pairs
+          )
+
+          pair_end = (
+              pair_start + num_pairs
+          )
+
+          sample_pair_probs = (
+              final_pair_probs[
+                  pair_start:pair_end
+              ]
+              .cpu()
+              .numpy()
+          )
+
+          sample_pair_edges = (
+              final_pair_edges[
+                  :,
+                  pair_start:pair_end
+              ]
+              .cpu()
+              .numpy()
+              .copy()
+          )
+
+          #
+          # duplicate_edge_index() offsets the node IDs:
+          #
+          # sample 0: 0 ... N-1
+          # sample 1: N ... 2N-1
+          # sample 2: 2N ... 3N-1
+          #
+          # The MIS decoder works on the original graph,
+          # so convert these back to local indices.
+          #
+          sample_pair_edges -= (
+              sample_idx * num_nodes
+          )
+
+          stacked_pair_probs.append(
+              sample_pair_probs
+          )
+
+          stacked_pair_edges.append(
+              sample_pair_edges
+          )
+
+      sequential_trajectories.append(
+          trajectory
+      )
 
     trajectory = finalize_trajectory(sequential_trajectories)
 
@@ -1166,11 +1312,49 @@ class MISModel(COMetaModel):
     
     # Decode MIS solution
     postprocess_start = time.perf_counter()
-
-    solved_solutions = [
-            mis_decode_np(sample, adj_mat) 
-            for sample in splitted_predict_labels
-    ]
+    if self.args.mis_decode_mode == "unary":
+      solved_solutions = [
+          mis_decode_np(
+              sample,
+              adj_mat,
+              selection_mode="unary",
+          )
+          for sample in splitted_predict_labels
+      ]
+    
+    elif self.args.mis_decode_mode == "static_pairwise":
+      assert len(stacked_pair_probs) == len(
+          splitted_predict_labels
+      )
+    
+      assert len(stacked_pair_edges) == len(
+          splitted_predict_labels
+      )
+    
+      solved_solutions = [
+          mis_decode_np(
+              sample,
+              adj_mat,
+              selection_mode="static_pairwise",
+              pair_probs=pair_probs,
+              pair_edges=pair_edges,
+          )
+          for (
+              sample,
+              pair_probs,
+              pair_edges,
+          ) in zip(
+              splitted_predict_labels,
+              stacked_pair_probs,
+              stacked_pair_edges,
+          )
+      ]
+    
+    else:
+      raise ValueError(
+          f"Unknown MIS decode mode: "
+          f"{self.args.mis_decode_mode}"
+      )
     postprocess_time = (
         time.perf_counter()
         - postprocess_start

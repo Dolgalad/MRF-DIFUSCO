@@ -129,6 +129,18 @@ def arg_parser():
       default="data/matching_cache",
   )
 
+  parser.add_argument(
+      '--mis_decode_mode',
+      type=str,
+      default='unary',
+      choices=['unary', 'static_pairwise'],
+      help=(
+          'MIS post-processing decoder. '
+          '"unary" preserves the existing vertex-wise greedy decoder; '
+          '"static_pairwise" uses joint predictions on the static matching.'
+      ),
+  )
+
 
   args = parser.parse_args()
 
