@@ -1,7 +1,7 @@
 """Lightning module for training the DIFUSCO MIS model."""
 
 import os
-
+import time
 import numpy as np
 import scipy.sparse
 import torch
@@ -13,7 +13,14 @@ from co_datasets.mis_dataset import MISDataset
 from utils.diffusion_schedulers import InferenceSchedule
 from pl_meta_model import COMetaModel
 from utils.mis_utils import mis_decode_np
-from utils.eval_metrics import (binary_state_from_xt, mis_state_metrics)
+from utils.eval_metrics import (
+    binary_state_from_xt,
+    mis_state_metrics,
+    compute_parallel_metrics,
+    mis_violation_mask,
+    append_parallel_metrics_to_trajectory,
+    finalize_trajectory,
+)
 
 class MISModel(COMetaModel):
   def __init__(self,
@@ -23,6 +30,15 @@ class MISModel(COMetaModel):
     train_label_dir = None
     val_label_dir = None
     test_label_dir = None
+
+    self._eval_records = {
+            "val": [],
+            "test": [],
+            }
+    self._eval_wall_start = {
+            "val": None,
+            "test": None,
+            }
     
     if self.args.training_split_label_dir is not None:
       train_label_dir = os.path.join(
@@ -733,7 +749,12 @@ class MISModel(COMetaModel):
       xt = self.gaussian_posterior(target_t, t, pred, xt)
       return xt
 
+
   def test_step(self, batch, batch_idx, draw=False, split='test'):
+    if torch.cuda.is_available():
+      torch.cuda.synchronize()
+    
+    sampling_wall_time = time.perf_counter()
     real_batch_idx, graph_data, point_indicator = batch
 
     device = batch[-1].device
@@ -763,6 +784,20 @@ class MISModel(COMetaModel):
         (np.ones_like(edge_index_np[0]), (edge_index_np[0], edge_index_np[1])),
     )
 
+    sequential_trajectories = []
+
+    batch_size = 1
+    steps = self.args.inference_diffusion_steps
+
+    schedule_t1 = []
+    schedule_t2 = []
+
+    for i in range(steps):
+      t1, t2 = time_schedule(i)
+      schedule_t1.append(int(t1))
+      schedule_t2.append(int(t2))
+
+
     for _ in range(self.args.sequential_sampling):
       edge_index = base_edge_index
       xt = torch.randn_like(node_labels.float())
@@ -783,14 +818,36 @@ class MISModel(COMetaModel):
             device,
         )
 
-      batch_size = 1
-      steps = self.args.inference_diffusion_steps
-      time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
-                                        T=self.diffusion.T, inference_T=steps)
+      #batch_size = 1
+      #steps = self.args.inference_diffusion_steps
+      #time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
+      #                                  T=self.diffusion.T, inference_T=steps)
 
+      trajectory = {
+          "raw_cost": [],
+          "feasible": [],
+          "violations": [],
+          "violating_vertices": [],
+          "violation_rate": [],
+          "selected_violation_rate": [],
+          "selected_fraction": [],
+          "created_violations": [],
+          "resolved_violations": [],
+          "step_time": [],
+      }
+
+      current_metrics = compute_parallel_metrics(
+          xt,
+          base_edge_index,
+          node_labels.shape[0],
+          self.args.parallel_sampling,
+      )
+
+      append_parallel_metrics_to_trajectory(trajectory, current_metrics)
 
       for i in range(steps):
-        t1, t2 = time_schedule(i)
+        t1 = schedule_t1[i]
+        t2 = schedule_t2[i]
     
         t1 = np.array(
             [t1 for _ in range(batch_size)]
@@ -818,6 +875,18 @@ class MISModel(COMetaModel):
           pair_mask = pair_mask.repeat(
               self.args.parallel_sampling
           )
+
+        prev_states = binary_state_from_xt(
+            xt
+        ).reshape(
+            self.args.parallel_sampling,
+            node_labels.shape[0],
+        )
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        step_start = time.perf_counter()
     
         if self.diffusion_type == "gaussian":
           xt = self.gaussian_denoise_step(
@@ -837,28 +906,503 @@ class MISModel(COMetaModel):
               target_t=t2,
           )
 
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        step_elapsed = time.perf_counter() - step_start
+        trajectory["step_time"].append(step_elapsed)
+
+        new_states = binary_state_from_xt(
+            xt
+        ).reshape(
+            self.args.parallel_sampling,
+            node_labels.shape[0],
+        )
+
+        current_metrics = compute_parallel_metrics(
+                xt,
+                base_edge_index,
+                node_labels.shape[0],
+                self.args.parallel_sampling,
+        )
+        append_parallel_metrics_to_trajectory(trajectory, current_metrics)
+
+        created_this_step = []
+        resolved_this_step = []
+
+        for sample_idx in range(
+            self.args.parallel_sampling
+        ):
+          prev_mask = mis_violation_mask(
+              prev_states[sample_idx],
+              base_edge_index,
+          )
+        
+          new_mask = mis_violation_mask(
+              new_states[sample_idx],
+              base_edge_index,
+          )
+        
+          created = (
+              (~prev_mask) & new_mask
+          ).sum()
+        
+          resolved = (
+              prev_mask & (~new_mask)
+          ).sum()
+
+          created_this_step.append(float(created.item()))
+          resolved_this_step.append(float(resolved.item()))
+        trajectory["created_violations"].append(
+            np.asarray(created_this_step)
+        )
+        
+        trajectory["resolved_violations"].append(
+            np.asarray(resolved_this_step)
+        )
+
       if self.diffusion_type == 'gaussian':
         predict_labels = xt.float().cpu().detach().numpy() * 0.5 + 0.5
       else:
         predict_labels = xt.float().cpu().detach().numpy() + 1e-6
       stacked_predict_labels.append(predict_labels)
 
+      sequential_trajectories.append(trajectory)
+
+    trajectory = finalize_trajectory(sequential_trajectories)
+
+    num_samples = (
+        self.args.sequential_sampling
+        * self.args.parallel_sampling
+    )
+
+    assert trajectory["raw_cost"].shape == (
+        num_samples,
+        steps + 1,
+    )
+
+    assert trajectory["violations"].shape == (
+        num_samples,
+        steps + 1,
+    )
+
+    assert trajectory["created_violations"].shape == (
+        num_samples,
+        steps,
+    )
+
+    assert trajectory["resolved_violations"].shape == (
+        num_samples,
+        steps,
+    )
+
+    model_diffusion_time = sum(
+        sum(t["step_time"])
+        for t in sequential_trajectories
+    )
+
     predict_labels = np.concatenate(stacked_predict_labels, axis=0)
     all_sampling = self.args.sequential_sampling * self.args.parallel_sampling
 
+    if torch.cuda.is_available():
+      torch.cuda.synchronize()
+    
+    sampling_wall_time = (
+        time.perf_counter()
+        - sampling_wall_time
+    )
+
     splitted_predict_labels = np.split(predict_labels, all_sampling)
-    solved_solutions = [mis_decode_np(predict_labels, adj_mat) for predict_labels in splitted_predict_labels]
+
+    raw_solutions = [
+        (sample >= 0.5).astype(np.int64)
+        for sample in splitted_predict_labels
+    ]
+
+    raw_metric_list = []
+
+    for raw_solution in raw_solutions:
+      raw_tensor = torch.from_numpy(
+          raw_solution
+      ).to(base_edge_index.device)
+    
+      raw_metrics = mis_state_metrics(
+          raw_tensor,
+          base_edge_index,
+      )
+    
+      raw_metric_list.append({
+          k: (
+              float(v.item())
+              if torch.is_tensor(v) and v.numel() == 1
+              else v
+          )
+          for k, v in raw_metrics.items()
+          if k != "violating_edge_mask"
+      })
+
+    final_trajectory_cost = trajectory[
+        "raw_cost"
+    ][:, -1]
+
+    final_trajectory_violations = trajectory[
+        "violations"
+    ][:, -1]
+
+    final_raw_cost = np.asarray([
+        m["cost"]
+        for m in raw_metric_list
+    ])
+
+    final_raw_violations = np.asarray([
+        m["violations"]
+        for m in raw_metric_list
+    ])
+
+    assert np.allclose(
+        final_trajectory_cost,
+        final_raw_cost,
+    ), (
+        "Final trajectory raw cost does not match "
+        "final raw solution cost."
+    )
+
+    assert np.allclose(
+        final_trajectory_violations,
+        final_raw_violations,
+    ), (
+        "Final trajectory violation count does not match "
+        "final raw solution violation count."
+    )
+
+    mean_raw_cost = np.mean([
+        m["cost"] for m in raw_metric_list
+    ])
+    
+    mean_raw_feasible = np.mean([
+        m["feasible"] for m in raw_metric_list
+    ])
+    
+    mean_raw_violations = np.mean([
+        m["violations"] for m in raw_metric_list
+    ])
+    
+    mean_raw_violating_vertices = np.mean([
+        m["violating_vertices"] for m in raw_metric_list
+    ])
+    
+    mean_raw_violation_rate = np.mean([
+        m["violation_rate"] for m in raw_metric_list
+    ])
+    
+    mean_raw_selected_violation_rate = np.mean([
+        m["selected_violation_rate"]
+        for m in raw_metric_list
+    ])
+    
+    # Decode MIS solution
+    postprocess_start = time.perf_counter()
+
+    solved_solutions = [
+            mis_decode_np(sample, adj_mat) 
+            for sample in splitted_predict_labels
+    ]
+    postprocess_time = (
+        time.perf_counter()
+        - postprocess_start
+    )
     solved_costs = [solved_solution.sum() for solved_solution in solved_solutions]
     best_solved_cost = np.max(solved_costs)
-
+    mean_solved_cost = np.mean(solved_costs)
+    std_solved_cost = np.std(solved_costs)
     gt_cost = node_labels.cpu().numpy().sum()
+
+    # postprocessing metrics
+    postprocess_stats = []
+
+    for raw, solved in zip(
+        raw_solutions,
+        solved_solutions,
+    ):
+      raw = raw.astype(bool)
+      solved = solved.astype(bool)
+    
+      removed = np.logical_and(
+          raw,
+          np.logical_not(solved),
+      ).sum()
+    
+      added = np.logical_and(
+          np.logical_not(raw),
+          solved,
+      ).sum()
+    
+      flips = np.not_equal(
+          raw,
+          solved,
+      ).sum()
+    
+      postprocess_stats.append({
+          "cost_gain": solved.sum() - raw.sum(),
+          "removed_vertices": removed,
+          "added_vertices": added,
+          "total_flips": flips,
+          "changed_fraction":
+              flips / max(raw.size, 1),
+      })
+
+
     metrics = {
         f"{split}/gt_cost": gt_cost,
+        f"{split}/raw_cost": mean_raw_cost,
+        f"{split}/raw_feasible": mean_raw_feasible,
+        f"{split}/raw_violations": mean_raw_violations,
+        f"{split}/raw_violating_vertices": mean_raw_violating_vertices,
+        f"{split}/raw_violation_rate": mean_raw_violation_rate,
+        f"{split}/raw_selected_violation_rate": mean_raw_selected_violation_rate,
+        f"{split}/best_solved_cost": best_solved_cost,
+        f"{split}/solved_cost_mean": mean_solved_cost,
+        f"{split}/solved_cost_std": std_solved_cost,
     }
+    metrics.update({
+        f"{split}/postprocess_cost_gain":
+            np.mean([m["cost_gain"] for m in postprocess_stats]),
+        f"{split}/postprocess_removed_vertices":
+            np.mean([m["removed_vertices"] for m in postprocess_stats]),
+        f"{split}/postprocess_added_vertices":
+            np.mean([m["added_vertices"] for m in postprocess_stats]),
+        f"{split}/postprocess_total_flips":
+            np.mean([m["total_flips"] for m in postprocess_stats]),
+        f"{split}/postprocess_changed_fraction":
+            np.mean([m["changed_fraction"] for m in postprocess_stats]),
+        f"{split}/sampling_wall_time":
+            sampling_wall_time,
+        f"{split}/model_diffusion_time":
+            model_diffusion_time,
+        f"{split}/postprocess_time":
+            postprocess_time,
+    })
     for k, v in metrics.items():
       self.log(k, float(v), on_epoch=True, sync_dist=True)
     self.log(f"{split}/solved_cost", float(best_solved_cost), prog_bar=True, on_epoch=True, sync_dist=True)
-    return metrics
+
+    record = {
+        "graph_id": int(batch_idx),
+        "batch_idx": int(batch_idx),
+        "gt_cost": float(gt_cost),
+    
+        "raw_cost": np.asarray([
+            m["cost"]
+            for m in raw_metric_list
+        ], dtype=np.float32),
+    
+        "raw_feasible": np.asarray([
+            m["feasible"]
+            for m in raw_metric_list
+        ], dtype=np.float32),
+    
+        "raw_violations": np.asarray([
+            m["violations"]
+            for m in raw_metric_list
+        ], dtype=np.float32),
+    
+        "raw_violating_vertices": np.asarray([
+            m["violating_vertices"]
+            for m in raw_metric_list
+        ], dtype=np.float32),
+
+        "raw_violation_rate": np.asarray([
+            m["violation_rate"]
+            for m in raw_metric_list
+        ], dtype=np.float32),
+
+        "raw_selected_violation_rate": np.asarray([
+            m["selected_violation_rate"]
+            for m in raw_metric_list
+        ], dtype=np.float32),
+
+        "raw_selected_fraction": np.asarray([
+            m["selected_fraction"]
+            for m in raw_metric_list
+        ], dtype=np.float32),
+    
+        "solved_cost": np.asarray(
+            solved_costs,
+            dtype=np.float32,
+        ),
+
+        "postprocess_cost_gain": np.asarray([
+            m["cost_gain"]
+            for m in postprocess_stats
+        ], dtype=np.float32),
+
+        "postprocess_removed_vertices": np.asarray([
+            m["removed_vertices"]
+            for m in postprocess_stats
+        ], dtype=np.float32),
+
+        "postprocess_added_vertices": np.asarray([
+            m["added_vertices"]
+            for m in postprocess_stats
+        ], dtype=np.float32),
+
+        "postprocess_total_flips": np.asarray([
+            m["total_flips"]
+            for m in postprocess_stats
+        ], dtype=np.float32),
+
+        "postprocess_changed_fraction": np.asarray([
+            m["changed_fraction"]
+            for m in postprocess_stats
+        ], dtype=np.float32),
+    
+        "raw_solutions": np.stack(
+            raw_solutions,
+            axis=0,
+        ),
+    
+        "solved_solutions": np.stack(
+            solved_solutions,
+            axis=0,
+        ),
+    
+        "trajectory": trajectory,
+    
+        "schedule_t1": np.asarray(
+            schedule_t1,
+            dtype=np.int64,
+        ),
+    
+        "schedule_t2": np.asarray(
+            schedule_t2,
+            dtype=np.int64,
+        ),
+    
+        "sampling_wall_time": float(
+            sampling_wall_time
+        ),
+
+        "model_diffusion_time": float(
+            model_diffusion_time
+        ),    
+
+        "postprocess_time": float(
+            postprocess_time
+        ),
+    }
+
+    self._eval_records[split].append(record)
+    
+    return {
+        "summary": metrics,
+        "schedule_t1": schedule_t1,
+        "schedule_t2": schedule_t2,
+        "sampling_wall_time": sampling_wall_time,
+        "model_diffusion_time": model_diffusion_time,
+        "postprocess_time": postprocess_time,
+        "trajectory": trajectory,
+        "solved_solutions": solved_solutions,
+        "raw_solutions": raw_solutions,
+        "graph_id": int(batch_idx),
+    }
+  def on_validation_epoch_start(self):
+    self._eval_records["val"] = []
+    self._eval_wall_start["val"] = (
+        time.perf_counter()
+    )
+
+    if torch.cuda.is_available():
+      torch.cuda.reset_peak_memory_stats()
+  
+  def on_test_epoch_start(self):
+    self._eval_records["test"] = []
+    self._eval_wall_start["test"] = (
+        time.perf_counter()
+    )
+    if torch.cuda.is_available():
+      torch.cuda.reset_peak_memory_stats()
+
+  def _eval_output_path(
+      self,
+      split,
+      extension,
+  ):
+    rank = getattr(
+        self.trainer,
+        "global_rank",
+        0,
+    )
+  
+    logs_dir = os.path.join(
+        self.args.storage_path,
+        "logs",
+    )
+  
+    os.makedirs(
+        logs_dir,
+        exist_ok=True,
+    )
+  
+    return os.path.join(
+        logs_dir,
+        f"{split}_metrics_rank{rank}.{extension}",
+    )
+  def on_test_epoch_end(self):
+    wall_time = (
+        time.perf_counter()
+        - self._eval_wall_start["test"]
+    )
+
+    peak_allocated_mb = None
+    peak_reserved_mb = None
+
+    if torch.cuda.is_available():
+      peak_allocated_mb = (
+          torch.cuda.max_memory_allocated()
+          / 1024**2
+      )
+      peak_reserved_mb = (
+          torch.cuda.max_memory_reserved()
+          / 1024**2
+      )
+
+    self._save_eval_records(
+        "test",
+        wall_time=wall_time,
+        peak_allocated_mb=peak_allocated_mb,
+        peak_reserved_mb=peak_reserved_mb,
+    )
+
+  def on_validation_epoch_end(self):
+    wall_time = (
+        time.perf_counter()
+        - self._eval_wall_start["val"]
+    )
+
+    peak_allocated_mb = None
+    peak_reserved_mb = None
+
+    if torch.cuda.is_available():
+      peak_allocated_mb = (
+          torch.cuda.max_memory_allocated()
+          / 1024**2
+      )
+      peak_reserved_mb = (
+          torch.cuda.max_memory_reserved()
+          / 1024**2
+      )
+
+    self._save_eval_records(
+        "val",
+        wall_time=wall_time,
+        peak_allocated_mb=peak_allocated_mb,
+        peak_reserved_mb=peak_reserved_mb,
+
+    )
+
+  def _save_eval_records(self, split, wall_time, peak_allocated_mb=None, peak_reserved_mb=None):
+    pass
+
 
   def validation_step(self, batch, batch_idx):
     return self.test_step(batch, batch_idx, split='val')

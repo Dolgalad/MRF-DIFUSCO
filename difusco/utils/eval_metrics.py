@@ -1,5 +1,5 @@
 import torch
-
+import numpy as np
 
 def binary_state_from_xt(xt, threshold=0.5):
     """
@@ -85,3 +85,132 @@ def mis_state_metrics(state, edge_index):
         "selected_fraction": selected_fraction,
         "violating_edge_mask": violating_edge_mask,
     }
+
+def split_parallel_states(
+        xt,
+        num_nodes,
+        parallel_sampling,
+    ):
+      return xt.reshape(
+          parallel_sampling,
+          num_nodes,
+      )
+def compute_parallel_metrics(
+    xt,
+    base_edge_index,
+    num_nodes,
+    num_samples,
+):
+    states = xt.reshape(
+        num_samples,
+        num_nodes,
+    )
+
+    return [
+        mis_state_metrics(
+            states[s],
+            base_edge_index,
+        )
+        for s in range(num_samples)
+    ]
+
+def mis_violation_mask(
+    state,
+    edge_index,
+):
+    x = binary_state_from_xt(state)
+    u, v = canonical_undirected_edges(edge_index)
+
+    return x[u].bool() & x[v].bool()
+
+def append_parallel_metrics_to_trajectory(
+    trajectory,
+    metrics_list,
+):
+    fields = {
+        "raw_cost": "cost",
+        "feasible": "feasible",
+        "violations": "violations",
+        "violating_vertices": "violating_vertices",
+        "violation_rate": "violation_rate",
+        "selected_violation_rate": "selected_violation_rate",
+        "selected_fraction": "selected_fraction",
+    }
+
+    for trajectory_key, metric_key in fields.items():
+        trajectory[trajectory_key].append(
+            torch.tensor([
+                float(m[metric_key].item())
+                for m in metrics_list
+            ]).cpu().numpy()
+        )
+
+def finalize_trajectory(
+    sequential_trajectories,
+):
+    result = {}
+
+    state_fields = [
+        "raw_cost",
+        "feasible",
+        "violations",
+        "violating_vertices",
+        "violation_rate",
+        "selected_violation_rate",
+        "selected_fraction",
+    ]
+
+    transition_fields = [
+        "created_violations",
+        "resolved_violations",
+    ]
+
+    for key in state_fields:
+        per_seq = []
+
+        for traj in sequential_trajectories:
+            # [T+1, P] -> [P, T+1]
+            arr = np.stack(
+                traj[key],
+                axis=0,
+            ).T
+
+            per_seq.append(arr)
+
+        result[key] = np.concatenate(
+            per_seq,
+            axis=0,
+        )
+
+    for key in transition_fields:
+        per_seq = []
+
+        for traj in sequential_trajectories:
+            # [T, P] -> [P, T]
+            arr = np.stack(
+                traj[key],
+                axis=0,
+            ).T
+
+            per_seq.append(arr)
+
+        result[key] = np.concatenate(
+            per_seq,
+            axis=0,
+        )
+
+    # Step time is shared across parallel samples.
+    # Keep one [sequential_sampling, T] array.
+    result["step_time"] = np.stack(
+        [
+            np.asarray(
+                traj["step_time"],
+                dtype=np.float64,
+            )
+            for traj
+            in sequential_trajectories
+        ],
+        axis=0,
+    )
+
+    return result
