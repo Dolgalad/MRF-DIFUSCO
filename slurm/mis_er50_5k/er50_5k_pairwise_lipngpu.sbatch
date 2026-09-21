@@ -9,7 +9,8 @@
 #SBATCH --array=0-5
 #SBATCH --output=/data1/schulz/slurm-%x-%A_%a.log
 #SBATCH --error=/data1/schulz/slurm-%x-%A_%a.log
-#SBATCH --nodelist=lipn-rtx1
+#SBATCH --nodelist=lipn-rtx[1-3]
+#SBATCH --chdir=/data1/schulz/MRF-DIFUSCO
 set -euo pipefail
 
 source "$HOME/miniconda3/etc/profile.d/conda.sh"

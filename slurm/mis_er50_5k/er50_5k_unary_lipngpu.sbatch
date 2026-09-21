@@ -21,7 +21,7 @@ cd "$PROJECT_DIR"
 ENV_ROOT="/data1/schulz/conda-envs/difusco-pairs-gpu"
 PYTHON="${ENV_ROOT}/bin/python"
 
-DIFFUSION_VALUES=(2 4 8 16 32 64)
+DIFFUSION_VALUES=(2 4 8 16 32 64 128 256)
 DIFFUSION_STEPS="${DIFFUSION_VALUES[$SLURM_ARRAY_TASK_ID]}"
 
 DATA_ROOT="/data1/schulz/MRF-DIFUSCO-data/mis_er50_5k"

@@ -1181,6 +1181,16 @@ class MISModel(COMetaModel):
     std_solved_cost = np.std(solved_costs)
     gt_cost = node_labels.cpu().numpy().sum()
 
+    raw_cost_ratio = np.asarray([
+        m["cost"] / max(float(gt_cost), 1.0)
+        for m in raw_metric_list
+    ], dtype=np.float32)
+
+    solved_cost_ratio = np.asarray([
+        cost / max(float(gt_cost), 1.0)
+        for cost in solved_costs
+    ], dtype=np.float32)
+
     # postprocessing metrics
     postprocess_stats = []
 
@@ -1251,6 +1261,10 @@ class MISModel(COMetaModel):
             float(score_mean.mean()),
         f"{split}/final_score_std":
             float(score_std.mean()),
+        f"{split}/raw_cost_ratio":
+            float(raw_cost_ratio.mean()),
+        f"{split}/solved_cost_ratio":
+            float(solved_cost_ratio.mean()),
     })
     for k, v in metrics.items():
       self.log(k, float(v), on_epoch=True, sync_dist=True)
@@ -1266,6 +1280,12 @@ class MISModel(COMetaModel):
         "final_score_std": score_std,
         "final_score_min": score_min,
         "final_score_max": score_max,
+
+        "raw_cost_ratio":
+            raw_cost_ratio,
+        
+        "solved_cost_ratio":
+            solved_cost_ratio,
     
         "raw_cost": np.asarray([
             m["cost"]
@@ -1526,8 +1546,8 @@ class MISModel(COMetaModel):
     ], dtype=np.float32)
   
     array_keys = [
-        "final_scores",
-  
+        "raw_cost_ratio",
+        "solved_cost_ratio",
         "raw_cost",
         "raw_feasible",
         "raw_violations",
@@ -1535,25 +1555,21 @@ class MISModel(COMetaModel):
         "raw_violation_rate",
         "raw_selected_violation_rate",
         "raw_selected_fraction",
-  
+    
         "solved_cost",
-  
-        "raw_solutions",
-        "solved_solutions",
-  
+    
         "postprocess_cost_gain",
         "postprocess_removed_vertices",
         "postprocess_added_vertices",
         "postprocess_total_flips",
         "postprocess_changed_fraction",
-  
+    
         "final_score_sum",
         "final_score_mean",
         "final_score_std",
         "final_score_min",
         "final_score_max",
-    ]
-  
+    ]  
     arrays = {
         "schema_version":
             np.asarray(1, dtype=np.int64),
@@ -1564,6 +1580,79 @@ class MISModel(COMetaModel):
         "gt_cost":
             gt_cost,
     }
+
+    #
+    # --------------------------------------------------
+    # Variable-size node data
+    #
+    # Per-record node arrays have shape:
+    #     [sample, num_nodes_i]
+    #
+    # Store them flattened as:
+    #     [total_nodes, sample]
+    #
+    # and recover graph i using:
+    #     node_ptr[i]:node_ptr[i + 1]
+    # --------------------------------------------------
+    #
+
+    node_counts = np.asarray([
+        r["final_scores"].shape[1]
+        for r in records
+    ], dtype=np.int64)
+
+    node_ptr = np.zeros(
+        len(records) + 1,
+        dtype=np.int64,
+    )
+
+    node_ptr[1:] = np.cumsum(
+        node_counts
+    )
+
+    arrays["node_count"] = node_counts
+    arrays["node_ptr"] = node_ptr
+
+    arrays["final_scores"] = np.concatenate([
+        r["final_scores"].T
+        for r in records
+    ], axis=0).astype(
+        np.float32,
+        copy=False,
+    )
+
+    arrays["raw_solutions"] = np.concatenate([
+        r["raw_solutions"].T
+        for r in records
+    ], axis=0).astype(
+        np.int8,
+        copy=False,
+    )
+
+    arrays["solved_solutions"] = np.concatenate([
+        r["solved_solutions"].T
+        for r in records
+    ], axis=0).astype(
+        np.int8,
+        copy=False,
+    )
+
+    total_nodes = int(
+        node_counts.sum()
+    )
+
+    assert arrays["final_scores"].shape[0] == total_nodes
+    assert arrays["raw_solutions"].shape[0] == total_nodes
+    assert arrays["solved_solutions"].shape[0] == total_nodes
+
+    num_samples = (
+        self.args.parallel_sampling
+        * self.args.sequential_sampling
+    )
+
+    assert arrays["final_scores"].shape[1] == num_samples
+    assert arrays["raw_solutions"].shape[1] == num_samples
+    assert arrays["solved_solutions"].shape[1] == num_samples
   
     for key in array_keys:
       if key in records[0]:
@@ -1663,6 +1752,17 @@ class MISModel(COMetaModel):
         "rank": int(rank),
   
         "num_graphs": len(records),
+        "num_nodes_total":
+            int(node_counts.sum()),
+
+        "num_nodes_min":
+            int(node_counts.min()),
+
+        "num_nodes_max":
+            int(node_counts.max()),
+
+        "num_nodes_mean":
+            float(node_counts.mean()),
   
         "prediction_type":
             self.args.prediction_type,
