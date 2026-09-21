@@ -789,6 +789,10 @@ class MISModel(COMetaModel):
     batch_size = 1
     steps = self.args.inference_diffusion_steps
 
+    time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
+                                      T=self.diffusion.T, inference_T=steps)
+
+
     schedule_t1 = []
     schedule_t2 = []
 
@@ -820,8 +824,6 @@ class MISModel(COMetaModel):
 
       #batch_size = 1
       #steps = self.args.inference_diffusion_steps
-      #time_schedule = InferenceSchedule(inference_schedule=self.args.inference_schedule,
-      #                                  T=self.diffusion.T, inference_T=steps)
 
       trajectory = {
           "raw_cost": [],
