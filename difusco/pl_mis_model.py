@@ -1294,19 +1294,14 @@ class MISModel(COMetaModel):
     }
 
     self._eval_records[split].append(record)
+
+    if batch_idx == 0:
+      print("Returned metrics:")
+      for k, v in metrics.items():
+        print(k, type(v), v)
     
-    return {
-        "summary": metrics,
-        "schedule_t1": schedule_t1,
-        "schedule_t2": schedule_t2,
-        "sampling_wall_time": sampling_wall_time,
-        "model_diffusion_time": model_diffusion_time,
-        "postprocess_time": postprocess_time,
-        "trajectory": trajectory,
-        "solved_solutions": solved_solutions,
-        "raw_solutions": raw_solutions,
-        "graph_id": int(batch_idx),
-    }
+    return metrics
+
   def on_validation_epoch_start(self):
     self._eval_records["val"] = []
     self._eval_wall_start["val"] = (
