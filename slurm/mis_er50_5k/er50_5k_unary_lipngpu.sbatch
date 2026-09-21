@@ -3,19 +3,23 @@
 #SBATCH --job-name=er50_5k_unary_lipngpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --time=20:00:00
 #SBATCH --array=0-5
 #SBATCH --output=/data1/schulz/slurm-%x-%A_%a.log
 #SBATCH --error=/data1/schulz/slurm-%x-%A_%a.log
-#SBATCH --nodelist=lipn-rtx1
+#SBATCH --nodelist=lipn-rtx[1-3]
+#SBATCH --chdir=/data1/schulz/MRF-DIFUSCO
 set -euo pipefail
 
-source "$HOME/miniconda3/etc/profile.d/conda.sh"
-conda activate difusco-pairs-gpu
+PROJECT_ROOT="/data1/schulz/MRF-DIFUSCO"
+PROJECT_DIR="${PROJECT_ROOT}/difusco"
 
-cd "$HOME/MRF-DIFUSCO/difusco"
+cd "$PROJECT_DIR"
+
+ENV_ROOT="/data1/schulz/conda-envs/difusco-pairs-gpu"
+PYTHON="${ENV_ROOT}/bin/python"
 
 DIFFUSION_VALUES=(2 4 8 16 32 64)
 DIFFUSION_STEPS="${DIFFUSION_VALUES[$SLURM_ARRAY_TASK_ID]}"
@@ -25,13 +29,22 @@ SWEEP_ROOT="/data1/schulz/MRF-DIFUSCO-runs/li0ngpu_er50_5k_diffusion_sweep"
 RUN_DIR="${SWEEP_ROOT}/unary/diff_${DIFFUSION_STEPS}"
 LOG_DIR="${RUN_DIR}/logs"
 
+[[ -x "$PYTHON" ]] || { echo "Python not found: $PYTHON"; exit 1; }
+[[ -d "$DATA_ROOT" ]] || { echo "Dataset not found: $DATA_ROOT"; exit 1; }
+
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
 SLURM_LOG="/data1/schulz/slurm-${SLURM_JOB_NAME}-${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.log"
 
 ln -sf "$SLURM_LOG" "$LOG_DIR/slurm.log"
 
+export PATH="${ENV_ROOT}/bin:${PATH}"
+export XDG_CACHE_HOME="/data1/schulz/.cache"
+export TORCH_HOME="/data1/schulz/.cache/torch"
 export WANDB_MODE=offline
+
+mkdir -p "$XDG_CACHE_HOME" "$TORCH_HOME"
+
 
 {
     echo "mode=unary"
@@ -41,11 +54,13 @@ export WANDB_MODE=offline
     echo "array_task_id=${SLURM_ARRAY_TASK_ID}"
     echo "hostname=$(hostname)"
     echo "start_time=$(date --iso-8601=seconds)"
-    echo "git_commit=$(git -C "$HOME/MRF-DIFUSCO" rev-parse HEAD)"
+    echo "git_commit=$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
     echo "dataset=${DATA_ROOT}"
-    echo "environment=${CONDA_DEFAULT_ENV}"
-    python --version
-    python - <<'PY'
+    echo "environment=${ENV_ROOT}"
+    echo "cpus_per_task=${SLURM_CPUS_PER_TASK:-unknown}"
+    echo "cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
+    "$PYTHON" --version
+    "$PYTHON" - <<'PY'
 import torch
 print("torch =", torch.__version__)
 print("torch_cuda =", torch.version.cuda)
@@ -55,7 +70,7 @@ if torch.cuda.is_available():
 PY
 } > "$RUN_DIR/metadata.txt" 2>&1
 
-python train.py \
+"$PYTHON" train.py \
   --task mis \
   --storage_path "$RUN_DIR" \
   --training_split "${DATA_ROOT}/train/*.gpickle" \
@@ -72,7 +87,7 @@ python train.py \
   --sequential_sampling 1 \
   --parallel_sampling 1 \
   --batch_size 64 \
-  --num_workers 16 \
+  --num_workers 8 \
   --num_epochs 50 \
   --n_layers 12 \
   --hidden_dim 256 \
