@@ -175,8 +175,6 @@ class MISModel(COMetaModel):
       node_labels,
       edge_index,
       pair_mask,
-      unary_loss_weight = 1.0,
-      pairwise_loss_weight = 1.0,
   ):
     assert pair_mask.dtype == torch.bool
     assert pair_mask.shape[0] == edge_pred.shape[0]
@@ -221,7 +219,7 @@ class MISModel(COMetaModel):
         reduction="mean",
     )
   
-    loss = unary_loss_weight * unary_loss + pairwise_loss_weight * pair_loss 
+    loss = self.args.unary_loss_weight * unary_loss + self.args.pairwise_loss_weight * pair_loss 
 
     return loss, unary_loss, pair_loss
 
@@ -259,7 +257,11 @@ class MISModel(COMetaModel):
 
     return unary_prob
 
-  def categorical_training_step(self, batch, batch_idx):
+  def categorical_training_step(
+          self, 
+          batch, 
+          batch_idx, 
+  ):
     _, graph_data, point_indicator = batch
     t = np.random.randint(1, self.diffusion.T + 1, point_indicator.shape[0]).astype(int)
     node_labels = graph_data.x
@@ -306,8 +308,6 @@ class MISModel(COMetaModel):
             node_labels=node_labels,
             edge_index=edge_index,
             pair_mask=pair_mask,
-            unary_loss_weight=args.unary_loss_weight,
-            pairwise_loss_weight=args.pairwise_loss_weight,
         )
         self.log("train/unary_loss", unary_loss_mean)
         self.log("train/pairwise_loss", pair_loss_mean)
@@ -350,11 +350,18 @@ class MISModel(COMetaModel):
     self.log("train/loss", loss)
     return loss
 
-  def training_step(self, batch, batch_idx):
+  def training_step(
+          self, 
+          batch, 
+          batch_idx,
+  ):
     if self.diffusion_type == 'gaussian':
       return self.gaussian_training_step(batch, batch_idx)
     elif self.diffusion_type == 'categorical':
-      return self.categorical_training_step(batch, batch_idx)
+      return self.categorical_training_step(
+              batch, 
+              batch_idx, 
+      )
 
   def static_pairwise_block_posterior(
       self,
