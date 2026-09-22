@@ -6,67 +6,6 @@ def greedy_balanced_matching_family(
     graph,
     num_matchings=32,
     seed=0,
-):
-    """
-    Fast approximate balanced family of maximal matchings.
-
-    Edges that have been used fewer times are considered first.
-    Ties are randomized.
-
-    Much cheaper than repeated max_weight_matching calls.
-    """
-    rng = np.random.default_rng(seed)
-
-    edges = [
-        tuple(sorted((int(u), int(v))))
-        for u, v in graph.edges()
-    ]
-
-    num_edges = len(edges)
-
-    if num_edges == 0:
-        return [[] for _ in range(num_matchings)]
-
-    usage = np.zeros(num_edges, dtype=np.int64)
-
-    family = []
-
-    for _ in range(num_matchings):
-        # Randomize tie-breaking first.
-        tie_break = rng.random(num_edges)
-
-        # Least-used edges first.
-        order = np.lexsort(
-            (
-                tie_break,
-                usage,
-            )
-        )
-
-        used_vertices = set()
-        matching = []
-
-        for edge_idx in order:
-            u, v = edges[edge_idx]
-
-            if u in used_vertices or v in used_vertices:
-                continue
-
-            matching.append((u, v))
-
-            used_vertices.add(u)
-            used_vertices.add(v)
-
-            usage[edge_idx] += 1
-
-        family.append(matching)
-
-    return family
-
-def greedy_balanced_matching_family(
-    graph,
-    num_matchings=32,
-    seed=0,
     vertex_balance=0.05,
 ):
     rng = np.random.default_rng(seed)
