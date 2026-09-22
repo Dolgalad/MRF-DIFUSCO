@@ -298,7 +298,7 @@ class MISModel(COMetaModel):
 
     if self.args.prediction_type == "unary":
         loss = F.cross_entropy(prediction, node_labels)
-        self.log("train/unary_loss", loss)
+        self.log("train/unary_loss", loss, on_step=True, on_epoch=True)
     else:
         node_pred, edge_pred = prediction
     
@@ -309,10 +309,10 @@ class MISModel(COMetaModel):
             edge_index=edge_index,
             pair_mask=pair_mask,
         )
-        self.log("train/unary_loss", unary_loss_mean)
-        self.log("train/pairwise_loss", pair_loss_mean)
+        self.log("train/unary_loss", unary_loss_mean, on_step=True, on_epoch=True)
+        self.log("train/pairwise_loss", pair_loss_mean, on_step=True, on_epoch=True)
 
-    self.log("train/loss", loss)
+    self.log("train/loss", loss, on_step=True, on_epoch=True)
     return loss
 
   def gaussian_training_step(self, batch, batch_idx):
