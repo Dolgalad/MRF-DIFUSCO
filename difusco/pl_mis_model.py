@@ -218,7 +218,7 @@ class MISModel(COMetaModel):
         pair_targets,
         reduction="mean",
     )
-  
+
     loss = self.args.unary_loss_weight * unary_loss + self.args.pairwise_loss_weight * pair_loss 
 
     return loss, unary_loss, pair_loss
