@@ -107,4 +107,5 @@ PY
   --do_train \
   --do_test \
   --seed "$SEED" \
+  --mis_decode_mode static_pairwise \
   2>&1 | tee "$LOG_DIR/train_test.log"
