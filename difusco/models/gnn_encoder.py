@@ -339,7 +339,9 @@ class GNNEncoder(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 3),
+            #zero_module(
+                nn.Linear(hidden_dim, 3)
+            #),
         )
 
     self.layers = nn.ModuleList([

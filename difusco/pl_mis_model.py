@@ -175,6 +175,8 @@ class MISModel(COMetaModel):
       node_labels,
       edge_index,
       pair_mask,
+      unary_loss_weight = 1.0,
+      pairwise_loss_weight = 1.0,
   ):
     assert pair_mask.dtype == torch.bool
     assert pair_mask.shape[0] == edge_pred.shape[0]
@@ -202,54 +204,26 @@ class MISModel(COMetaModel):
 
     bad = pair_targets == 3
 
-    #if bad.any():
-    #  bad_idx = torch.nonzero(bad, as_tuple=False).flatten()
-    #
-    #  print("FOUND INVALID MIS EDGES")
-    #  print("num invalid directed edges:", bad_idx.numel())
-    #
-    #  for k in bad_idx[:20]:
-    #    u = int(edge_index[0, k])
-    #    v = int(edge_index[1, k])
-    #    yu = int(node_labels[u])
-    #    yv = int(node_labels[v])
-    #
-    #    print(
-    #        f"edge_idx={int(k)} "
-    #        f"edge=({u},{v}) "
-    #        f"labels=({yu},{yv})"
-    #    )
-    #
-    #  raise ValueError("Invalid MIS target: graph edge has state 11.")
-  
     if torch.any(pair_targets == 3):
       raise ValueError(
           "Invalid MIS target: graph edge has state 11."
       )
-  
-    pair_loss = F.cross_entropy(
-        edge_pred[non_self_loop],
-        pair_targets,
-        reduction="sum",
-    )
-  
+
     unary_loss = F.cross_entropy(
         node_pred,
         node_labels.long(),
-        reduction="sum",
+        reduction="mean",
+    )
+ 
+    pair_loss = F.cross_entropy(
+        edge_pred[non_self_loop],
+        pair_targets,
+        reduction="mean",
     )
   
-    num_blocks = (
-        edge_pred.shape[0]
-        + node_labels.numel()
-    )
-  
-    loss = (pair_loss + unary_loss) / num_blocks
+    loss = unary_loss_weight * unary_loss + pairwise_loss_weight * pair_loss 
 
-    unary_loss_mean = unary_loss / node_labels.numel()
-    pair_loss_mean = pair_loss / edge_pred.shape[0]
-
-    return loss, unary_loss_mean, pair_loss_mean
+    return loss, unary_loss, pair_loss
 
   def static_pairwise_to_unary_probs(
       self,
@@ -332,6 +306,8 @@ class MISModel(COMetaModel):
             node_labels=node_labels,
             edge_index=edge_index,
             pair_mask=pair_mask,
+            unary_loss_weight=args.unary_loss_weight,
+            pairwise_loss_weight=args.pairwise_loss_weight,
         )
         self.log("train/unary_loss", unary_loss_mean)
         self.log("train/pairwise_loss", pair_loss_mean)

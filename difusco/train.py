@@ -141,6 +141,20 @@ def arg_parser():
       ),
   )
 
+  parser.add_argument(
+      '--unary_loss_weight',
+      type=float,
+      default=1.0,
+      help=("Unary loss weight"),
+  )
+
+  parser.add_argument(
+      '--pairwise_loss_weight',
+      type=float,
+      default=1.0,
+      help=("Pairwise loss weight"),
+  )
+
 
   args = parser.parse_args()
 
